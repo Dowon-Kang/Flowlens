@@ -173,9 +173,9 @@ def build_analysis(snapshot: Snapshot, facts: list[Fact], evidence: list[Evidenc
         system_nodes.append(Node(id=cid,label=label,kind='component',role=role,description=description,
                                  evidence_ids=list(dict.fromkeys(e for n in members for e in n.evidence_ids)),member_ids=[n.id for n in members],tags=tags))
     # Preserve canonical entities while folding lower-priority infrastructure in the overview.
-    if len(system_nodes)>8:
+    if len(system_nodes)>7:
         infra_nodes=[n for n in system_nodes if n.role=='infrastructure']
-        keep_count=max(1,8-(len(system_nodes)-len(infra_nodes))-1)
+        keep_count=max(1,7-(len(system_nodes)-len(infra_nodes))-1)
         fold=infra_nodes[keep_count:]
         if fold:
             fold_ids={n.id for n in fold}; members=[x for n in fold for x in n.member_ids]

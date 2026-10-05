@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Literal
+from . import __version__
 from pydantic import BaseModel, ConfigDict, Field
 
 class Model(BaseModel):
@@ -103,7 +104,7 @@ class Explanation(Model):
 
 class Analysis(Model):
     schema_version: str = "1.0"
-    analyzer_version: str = "0.2.0"
+    analyzer_version: str = __version__
     name: str
     source: str
     revision: str

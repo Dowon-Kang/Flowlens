@@ -6,15 +6,16 @@ import argparse, json, os, re, sys, tempfile, zipfile
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, expect
 
 
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--bridge',action='store_true',help='Test in-memory HTML -> JS fetch bridge -> FastAPI TestClient')
     parser.add_argument('--url',default='http://127.0.0.1:8000')
+    parser.add_argument('--output',default=str(ROOT/'evidence'))
     parser.add_argument('--executable',default=os.getenv('PLAYWRIGHT_CHROMIUM_EXECUTABLE'))
-    args=parser.parse_args(); out=ROOT/'evidence';out.mkdir(exist_ok=True)
+    args=parser.parse_args(); out=Path(args.output);out.mkdir(parents=True,exist_ok=True)
     checks=[];errors=[];client=None
     with sync_playwright() as p:
         kwargs={'headless':True}
@@ -27,7 +28,7 @@ def main():
             from app.main import app
             client=TestClient(app)
             def api(path,options):
-                response=client.request(options.get('method','GET'),path,headers=options.get('headers',{}),content=options.get('body'))
+                response=client.request(options.get('method','GET'),path,headers=options.get('headers',{}),content=bytes(options['body']) if isinstance(options.get('body'),list) else options.get('body'))
                 return {'status':response.status_code,'body':response.text}
             page.expose_function('__flowlensApi',api)
             html=(ROOT/'static/index.html').read_text(encoding='utf-8')
@@ -35,7 +36,7 @@ def main():
             html=re.sub(r'<script[^>]*>.*?</script>','',html,flags=re.S)
             page.set_content(html)
             page.add_style_tag(content=(ROOT/'static/styles.css').read_text(encoding='utf-8'))
-            page.add_script_tag(content="window.fetch=async(path,opts={})=>{const r=await window.__flowlensApi(String(path),{method:opts.method,headers:opts.headers,body:opts.body});return new Response(r.body,{status:r.status,headers:{'Content-Type':'application/json'}})}")
+            page.add_script_tag(content="window.fetch=async(path,opts={})=>{const r=await window.__flowlensApi(String(path),{method:opts.method,headers:opts.headers,body:opts.body instanceof Blob?Array.from(new Uint8Array(await opts.body.arrayBuffer())):opts.body});return new Response(r.body,{status:r.status,headers:{'Content-Type':'application/json'}})}")
             page.add_script_tag(content=(ROOT/'static/app.js').read_text(encoding='utf-8'),type='module')
         else:
             page.goto(args.url,wait_until='networkidle')
@@ -75,28 +76,28 @@ def main():
         assert '런타임' in page.locator('#pipelineView').inner_text() or '운영' in page.locator('#pipelineView').inner_text()
         checks.append('Actual stage history and analysis limitations visible')
         page.locator('[data-demo="python"]').click()
-        page.wait_for_function("document.querySelector('#repoName').textContent.includes('TaskBoard')")
+        expect(page.locator("#repoName")).to_contain_text("TaskBoard")
         assert 'FastAPI Backend' in page.locator('#graph').text_content()
         assert 'Flutter App' not in page.locator('#graph').text_content()
         checks.append('Different repository/stack changes overview')
         page.locator('#helpButton').click();assert page.locator('#helpDialog').is_visible();page.locator('#closeHelp').click()
         checks.append('Help dialog opens and closes')
         page.locator('#folderInput').set_input_files(str(ROOT/'fixtures/python-demo'))
-        page.wait_for_function("document.querySelector('#sourceBadge').textContent === 'Local files'")
+        expect(page.locator("#sourceBadge")).to_have_text("Local files")
         assert 'FastAPI Backend' in page.locator('#graph').text_content()
         checks.append('Actual folder picker selection -> file contents -> API -> new graph')
-        if not args.bridge:
+        if True:  # Both modes test selected ZIP bytes.
             with tempfile.TemporaryDirectory() as td:
                 zip_path=Path(td)/'zip-browser-demo.zip'
                 with zipfile.ZipFile(zip_path,'w',zipfile.ZIP_DEFLATED) as zf:
                     zf.writestr('zip-browser-demo/src/main.py', "from fastapi import FastAPI\napp=FastAPI()\n@app.get('/zip-health')\ndef health(): return {'ok': True}\n")
                 page.locator('#zipInput').set_input_files(str(zip_path))
-                page.wait_for_function("document.querySelector('#sourceBadge').textContent === 'ZIP archive'")
+                expect(page.locator("#sourceBadge")).to_have_text("ZIP archive")
                 assert 'FastAPI Backend' in page.locator('#graph').text_content()
                 assert 'zip-browser-demo' in page.locator('#repoName').inner_text()
                 checks.append('Actual ZIP picker -> raw ZIP upload -> safe server intake -> graph')
         page.locator('[data-demo="mobile"]').click()
-        page.wait_for_function("document.querySelector('#repoName').textContent.includes('FlowCare')")
+        expect(page.locator("#repoName")).to_contain_text("FlowCare")
         page.set_viewport_size({'width':430,'height':932})
         assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
         page.screenshot(path=str(out/'mobile-view.png'),full_page=True)

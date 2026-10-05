@@ -7,6 +7,7 @@ import io
 import re
 import stat
 import zipfile
+import zlib
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse, quote
 import httpx
@@ -47,9 +48,9 @@ def priority(path: str) -> tuple[int, str]:
     p = path.lower()
     if PurePosixPath(p).name in MANIFESTS:
         rank = 0
-    elif re.search(r'(^|/)(main|index|app)\.(py|tsx?|jsx?|dart)$', p):
+    elif re.search(r'(^|/)(main|index|app|server|node-server|runtime|providers)\.(py|tsx?|jsx?|dart)$', p):
         rank = 1
-    elif 'route' in p:
+    elif re.search(r'route|controller|provider|/storage/|/(algorithm|auth)\.', p):
         rank = 2
     elif 'service' in p or 'controller' in p or 'client' in p:
         rank = 3
@@ -71,7 +72,7 @@ def from_files(files: list[SourceFile], name: str = 'Local repository', source: 
             if len(item.content.encode('utf-8')) > MAX_FILE_BYTES or '\x00' in item.content:
                 oversized += 1
                 continue
-            candidates.append(item)
+            candidates.append(SourceFile(path=path, content=item.content))
     accepted: list[SourceFile] = []
     total = 0
     for item in sorted(candidates, key=lambda x: priority(x.path)):
@@ -112,7 +113,7 @@ def _strip_common_zip_root(paths: list[str]) -> dict[str, str]:
     return {path: path for path in paths}
 
 def from_zip_bytes(data: bytes, filename: str = 'repository.zip') -> Snapshot:
-    """Read supported source files directly from a ZIP without extracting or executing it."""
+    """Bound decompression before reads; never extract or execute target code."""
     if not data:
         raise IntakeError('ZIP 파일이 비어 있습니다.')
     if len(data) > MAX_ZIP_BYTES:
@@ -122,52 +123,52 @@ def from_zip_bytes(data: bytes, filename: str = 'repository.zip') -> Snapshot:
     except (zipfile.BadZipFile, ValueError) as exc:
         raise IntakeError('올바른 ZIP 파일이 아닙니다.') from exc
     with archive:
-        infos = [info for info in archive.infolist() if not info.is_dir()]
-        if len(infos) > MAX_ZIP_ENTRIES:
-            raise IntakeError(f'ZIP 내부 파일이 너무 많습니다. 최대 {MAX_ZIP_ENTRIES}개까지 검사합니다.')
-        raw_paths: list[str] = []
-        accepted_infos: list[zipfile.ZipInfo] = []
-        rejected = 0
+        entries = archive.infolist()
+        if len(entries) > MAX_ZIP_ENTRIES:
+            raise IntakeError(f'ZIP 내부 항목이 너무 많습니다. 최대 {MAX_ZIP_ENTRIES}개까지 검사합니다.')
+        infos = [info for info in entries if not info.is_dir()]
+        paths: list[str] = []
+        seen: set[str] = set()
         for info in infos:
-            path = info.filename.replace('\\', '/')
-            try:
-                valid_path(path)
-            except IntakeError:
-                raise IntakeError(f'ZIP에 안전하지 않은 경로가 포함되어 있습니다: {path[:120]}')
+            path = valid_path(info.orig_filename.replace('\\', '/'))
+            if path in seen:
+                raise IntakeError(f'ZIP에 중복된 경로가 있습니다: {path[:120]}')
+            seen.add(path)
             if info.flag_bits & 0x1:
                 raise IntakeError('암호화된 ZIP 파일은 지원하지 않습니다.')
-            if _zip_member_is_symlink(info):
-                rejected += 1
-                continue
-            if info.file_size > MAX_ZIP_MEMBER_BYTES:
-                rejected += 1
-                continue
-            raw_paths.append(path)
-            accepted_infos.append(info)
-        mapping = _strip_common_zip_root(raw_paths)
+            paths.append(path)
+        mapping = _strip_common_zip_root(paths)
+        candidates = [(info, mapping[path]) for info, path in zip(infos, paths)
+                      if eligible_path(mapping[path])]
         files: list[SourceFile] = []
-        decode_failed = 0
-        for info, raw_path in zip(accepted_infos, raw_paths):
-            path = mapping[raw_path]
-            if not path or not eligible_path(path):
+        omitted = failed = consumed = attempts = 0
+        for info, path in sorted(candidates, key=lambda item: priority(item[1])):
+            if (_zip_member_is_symlink(info) or info.file_size > MAX_FILE_BYTES
+                    or attempts >= MAX_FILES or consumed + info.file_size > MAX_TOTAL_BYTES):
+                omitted += 1
                 continue
+            attempts += 1
+            consumed += info.file_size
             try:
                 raw = archive.read(info)
-                if len(raw) > MAX_FILE_BYTES or b'\x00' in raw:
-                    rejected += 1
-                    continue
+                if len(raw) != info.file_size or b'\x00' in raw:
+                    raise ValueError('invalid text member')
                 files.append(SourceFile(path=path, content=raw.decode('utf-8')))
-            except (UnicodeDecodeError, RuntimeError, zipfile.BadZipFile):
-                decode_failed += 1
+            except (UnicodeError, RuntimeError, zipfile.BadZipFile, zlib.error, EOFError, ValueError):
+                failed += 1
         name = PurePosixPath(filename or 'repository.zip').name.removesuffix('.zip') or 'ZIP repository'
         snapshot = from_files(files, name=name, source='zip')
-        snapshot.coverage.discovered = len(infos)
-        snapshot.coverage.failed += decode_failed
-        snapshot.coverage.skipped = max(0, len(infos) - snapshot.coverage.eligible - rejected - decode_failed)
-        if rejected or decode_failed:
-            snapshot.coverage.partial = True
-            snapshot.warnings.append(f'ZIP 안전/크기/인코딩 기준으로 {rejected + decode_failed}개 항목을 읽지 않았습니다.')
-        snapshot.coverage.notes.append('ZIP은 메모리에서 읽으며 파일을 디스크에 풀거나 대상 코드를 실행하지 않습니다.')
+        cov = snapshot.coverage
+        cov.discovered = len(infos)
+        cov.eligible = len(candidates)
+        cov.skipped = len(infos) - len(candidates)
+        cov.omitted += omitted
+        cov.failed = failed
+        cov.partial = bool(cov.omitted or failed)
+        if cov.partial:
+            snapshot.warnings.append(f'ZIP 부분 분석: 지원 후보 {cov.eligible}개 중 {cov.analyzed}개 분석, {cov.omitted}개 제한 제외, {failed}개 읽기 실패.')
+        cov.notes.append('ZIP은 메모리에서 읽으며 파일을 디스크에 풀거나 대상 코드를 실행하지 않습니다.')
+        cov.notes.append('압축 해제 전에 파일당 64 KiB, 최대 파일 수와 총 2 MiB 읽기 예산을 적용합니다.')
         return snapshot
 
 def load_demo(name: str = 'mobile') -> Snapshot:
@@ -201,7 +202,7 @@ class GitHubReader:
         try:
             async with self.client.stream('GET', 'https://api.github.com' + path, follow_redirects=False) as response:
                 if response.status_code in {403, 429}:
-                    raise IntakeError('GitHub 요청 제한 또는 권한 오류입니다. 잠시 후 다시 시도하거나 로컬 폴더를 사용해 주세요.')
+                    raise IntakeError('GitHub 요청 제한 또는 권한 오류입니다. 잠시 후 다시 시도하거나 ZIP 또는 로컬 폴더를 사용해 주세요.')
                 if response.status_code == 404:
                     raise IntakeError('공개 저장소 또는 해당 파일을 찾지 못했습니다.')
                 if response.status_code != 200:
@@ -219,7 +220,7 @@ class GitHubReader:
         except (httpx.HTTPError, ValueError) as exc:
             if isinstance(exc, IntakeError):
                 raise
-            raise IntakeError('GitHub 연결 또는 응답 해석에 실패했습니다. 로컬 폴더 분석을 사용할 수 있습니다.') from exc
+            raise IntakeError('GitHub 연결 또는 응답 해석에 실패했습니다. ZIP 또는 로컬 폴더 분석을 사용할 수 있습니다.') from exc
 
     async def read(self, url: str) -> Snapshot:
         owner, repo = parse_github_url(url)

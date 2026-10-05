@@ -97,13 +97,13 @@ def extract_facts(snapshot: Snapshot) -> tuple[list[Fact], list[Evidence], list[
             for match in re.finditer(pattern, nc, re.M):
                 if any(not c.isspace() for c in code[match.start():match.start()+min(6, len(match.group()))]):
                     yield match
-        import_patterns = [r'\b(?:import|export)\s+[^;\n]*?\bfrom\s*[\'"]([^\'"\n]+)[\'"]',
+        import_patterns = [r'\b(?:import|export)\s+[^;]{1,3000}?\bfrom\s*[\'"]([^\'"\n]+)[\'"]',
                            r'\bimport\s*[\'"]([^\'"\n]+)[\'"]',
                            r'\brequire\s*\(\s*[\'"]([^\'"\n]+)[\'"]\s*\)']
         for pattern in import_patterns:
             for m in matches(pattern):
-                add(path,text,text.count('\n',0,m.start())+1,'import',m.group(1),'lexical')
-        route_pattern = r'\b([A-Za-z_$][\w$]*)\.(get|post|put|patch|delete|options|head)\s*\(\s*[\'"]([^\'"\n]+)[\'"]'
+                add(path,text,text.count('\n',0,m.start())+1,'import',m.group(1),'lexical',end_line=text.count('\n',0,m.end())+1)
+        route_pattern = r'\b([A-Za-z_$][\w$]*)\.(get|post|put|patch|delete|options|head)\s*(?:<[^;()]{1,200}>)?\s*\(\s*[\'"]([^\'"\n]+)[\'"]'
         for m in matches(route_pattern):
             obj, method, value = m.groups()
             if '$' in value or '{' in value and not value.startswith('/'):
@@ -111,7 +111,7 @@ def extract_facts(snapshot: Snapshot) -> tuple[list[Fact], list[Evidence], list[
             is_client = obj.lower().strip('_') in {'dio', 'axios', 'http', 'client', 'apiclient', 'session'}
             is_route = obj.lower() in {'app', 'router', 'api', 'server'} or 'route' in obj.lower()
             if is_client or is_route:
-                add(path,text,text.count('\n',0,m.start())+1,'request' if is_client else 'route',value,'lexical',method.upper())
+                add(path,text,text.count('\n',0,m.start())+1,'request' if is_client else 'route',value,'lexical',method.upper(),end_line=text.count('\n',0,m.end())+1)
         for m in matches(r'\bfetch\s*\(\s*[\'"]([^\'"\n]+)[\'"]'):
             # Only a no-options call has an unambiguous default method in this adapter.
             tail = nc[m.end():m.end()+12]

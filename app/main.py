@@ -83,13 +83,13 @@ async def analyze_zip(request: Request, explain: bool = False, filename: str = '
         if len(raw)>MAX_ZIP_BYTES:
             return JSONResponse({'error':f'ZIP 파일은 {MAX_ZIP_BYTES // (1024*1024)} MiB 이하만 지원합니다.'},status_code=413)
     try:
-        snapshot=from_zip_bytes(bytes(raw), filename=filename)
         try:
             await asyncio.wait_for(semaphore.acquire(),timeout=0.1)
         except TimeoutError:
             return JSONResponse({'error':'분석이 진행 중입니다. 현재 요청이 끝난 뒤 다시 시도해 주세요.'},status_code=429)
         try:
             async with asyncio.timeout(140):
+                snapshot=await asyncio.to_thread(from_zip_bytes, bytes(raw), filename)
                 result=await analyze_snapshot(snapshot, explain)
             return JSONResponse(result.model_dump())
         finally:
