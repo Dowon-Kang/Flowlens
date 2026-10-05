@@ -1,0 +1,47 @@
+name: Feature flow acceptance
+on:
+  push:
+    branches: [feat/evidence-scoped-flows]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  reference:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Read public source as data, never execute target code
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import asyncio, hashlib, json, os, subprocess
+          from pathlib import Path
+          import httpx
+          import app.intake as intake
+          intake.MAX_REMOTE_FILES = 160
+          out = Path('evidence/feature-reference'); out.mkdir(parents=True, exist_ok=True)
+          async def run():
+              headers = {'Accept': 'application/vnd.github+json', 'User-Agent': 'FlowLens-Acceptance', 'Authorization': 'Bearer '+os.environ['GITHUB_TOKEN']}
+              async with httpx.AsyncClient(headers=headers, timeout=20, trust_env=False) as client:
+                  snapshot = await intake.GitHubReader(client).read('https://github.com/Dowon-Kang/vibecare-pilot')
+              (out/'snapshot.json').write_text(snapshot.model_dump_json(), encoding='utf-8')
+              print(snapshot.revision, snapshot.coverage.model_dump())
+          asyncio.run(run())
+          names = subprocess.check_output(['git','ls-files'], text=True).splitlines()
+          manifest = {name: hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in names if Path(name).is_file()}
+          (out/'source-manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: feature-reference
+          path: evidence/feature-reference/
+          retention-days: 7
