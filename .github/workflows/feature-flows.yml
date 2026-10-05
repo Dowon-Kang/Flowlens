@@ -50,11 +50,10 @@ jobs:
           PY
           python scripts/process_browser.py --snapshot evidence/cycle-04-ci/snapshot.json --output evidence/cycle-04-ci/process-browser
           python scripts/build_review_demo.py evidence/cycle-04-ci/semantic/analysis.json evidence/cycle-04-ci/FlowLens_Demo.html
-      - name: Save verified ordinary source and remove one-time writer
+      - name: Save verified source only; workflow settings are updated separately
         run: |
-          cp .automation/verified-feature-workflow.yml .github/workflows/feature-flows.yml
           git rm .automation/sync_backend.py .automation/sync_ui.py .automation/sync_docs.py .automation/verified-feature-workflow.yml
-          git add app static scripts tests docs README.md CHANGELOG.md .github/workflows/feature-flows.yml
+          git add app static scripts tests docs README.md CHANGELOG.md
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'feat: verified v0.3 processing summaries and evidence-scoped function exploration'
