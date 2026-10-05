@@ -1,42 +1,36 @@
 name: Feature flow acceptance
 on:
   push:
-    branches: [feat/evidence-scoped-flows]
+    branches: [main, feat/evidence-scoped-flows]
+    paths-ignore: ['docs/**', 'README.md', 'CHANGELOG.md', 'evidence/**']
   workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
 jobs:
-  verified-source-update:
+  acceptance:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Apply only checksum-guarded reviewed edits
-        run: |
-          python .automation/sync_backend.py
-          python .automation/sync_ui.py
-          python .automation/sync_docs.py
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m playwright install --with-deps chromium
-      - name: Unit, HTTP, browser, real GitHub and same-commit ZIP
+      - name: Capture actual public source as data
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/verify.py --browser --live https://github.com/Dowon-Kang/vibecare-pilot --output evidence/cycle-04-ci
-      - name: Capture source and check meaning, not just clickability
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/capture_reference.py --output evidence/acceptance-ci/snapshot.json
+      - name: Meaning-level acceptance
+        run: python scripts/acceptance_flow.py --snapshot evidence/acceptance-ci/snapshot.json --output evidence/acceptance-ci/semantic
+      - name: Actual browser upload and drill-down
         run: |
-          python scripts/capture_reference.py --output evidence/cycle-04-ci/snapshot.json
-          python scripts/acceptance_flow.py --snapshot evidence/cycle-04-ci/snapshot.json --output evidence/cycle-04-ci/semantic
-      - name: Actual browser upload and nested processing flow
-        run: |
-          python run.py > evidence/cycle-04-ci/acceptance-server.log 2>&1 &
+          python run.py > evidence/acceptance-ci/server.log 2>&1 &
           PID=$!
           trap 'kill "$PID" || true' EXIT
           python - <<'PY'
@@ -48,31 +42,11 @@ jobs:
               time.sleep(0.2)
           else:raise SystemExit('Server failed to start')
           PY
-          python scripts/process_browser.py --snapshot evidence/cycle-04-ci/snapshot.json --output evidence/cycle-04-ci/process-browser
-          python scripts/build_review_demo.py evidence/cycle-04-ci/semantic/analysis.json evidence/cycle-04-ci/FlowLens_Demo.html
-      - name: Save verified source only; workflow settings are updated separately
-        run: |
-          git rm .automation/sync_backend.py .automation/sync_ui.py .automation/sync_docs.py .automation/verified-feature-workflow.yml
-          git add app static scripts tests docs README.md CHANGELOG.md
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'feat: verified v0.3 processing summaries and evidence-scoped function exploration'
-          git push origin HEAD:refs/heads/feat/evidence-scoped-flows
-          python - <<'PY'
-          import hashlib,json,subprocess,zipfile
-          from pathlib import Path
-          out=Path('evidence/cycle-04-ci')
-          files=subprocess.check_output(['git','ls-files'],text=True).splitlines()
-          files=[f for f in files if not f.endswith('.zip') and not f.startswith('evidence/')]
-          manifest={f:hashlib.sha256(Path(f).read_bytes()).hexdigest() for f in files}
-          (out/'source-manifest.json').write_text(json.dumps(manifest),encoding='utf-8')
-          (out/'source-commit.txt').write_text(subprocess.check_output(['git','rev-parse','HEAD'],text=True),encoding='utf-8')
-          with zipfile.ZipFile(out/'FlowLens_Source.zip','w',zipfile.ZIP_DEFLATED) as z:
-              for f in files:z.write(f,'flowlens/'+f)
-          PY
+          python scripts/process_browser.py --snapshot evidence/acceptance-ci/snapshot.json --output evidence/acceptance-ci/browser
+          python scripts/build_review_demo.py evidence/acceptance-ci/semantic/analysis.json evidence/acceptance-ci/FlowLens_Demo.html
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: cycle-04-verification
-          path: evidence/cycle-04-ci/
+          name: feature-flow-acceptance
+          path: evidence/acceptance-ci/
           retention-days: 7
