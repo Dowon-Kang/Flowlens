@@ -2,7 +2,7 @@ name: Cycle 03 apply and verify
 on:
   push:
     branches: [main]
-    paths: ['.github/workflows/cycle-03.yml', 'scripts/apply_cycle03.py']
+    paths: ['.github/workflows/cycle-03.yml', 'scripts/apply_cycle03.py', 'scripts/fix_browser_csp.py']
   workflow_dispatch:
 permissions:
   contents: write
@@ -20,7 +20,9 @@ jobs:
         with:
           node-version: '22'
       - name: Apply checksum-guarded reviewed corrections
-        run: python scripts/apply_cycle03.py
+        run: |
+          python scripts/apply_cycle03.py
+          python scripts/fix_browser_csp.py
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m playwright install --with-deps chromium
       - name: Unit, actual HTTP browser, real GitHub and same-commit ZIP
@@ -31,7 +33,7 @@ jobs:
         run: |
           git add app scripts/browser_smoke.py
           if git diff --cached --quiet; then exit 0; fi
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix: verified v0.2.1 parser, ZIP and browser corrections'
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix: verified v0.2.1 parser, ZIP and CSP-compatible browser checks'
           git push origin HEAD:main
       - name: Preserve actual execution logs and screenshots
         if: always()
