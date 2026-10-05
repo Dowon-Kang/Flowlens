@@ -38,3 +38,31 @@ def verify_analysis(result: Analysis, snapshot: Snapshot) -> None:
         if not set(f.component_ids)<=set(system): raise VerificationError('feature의 상위 context 없음')
         for eid in f.edge_ids:
             if edges[eid].source not in f.node_ids or edges[eid].target not in f.node_ids: raise VerificationError('feature edge endpoint 누락')
+
+    flows={f.id:f for f in result.flows}
+    if len(flows)!=len(result.flows): raise VerificationError('중복 처리 지도 ID')
+    step_ids=set()
+    for flow in result.flows:
+        if flow.path not in files or not (1<=flow.line<=flow.end_line<=len(files[flow.path])):
+            raise VerificationError('처리 지도 범위 오류')
+        if flow.order!='source-order': raise VerificationError('미검증 실행 순서')
+        if not flow.node_ids or not set(flow.node_ids)<=set(nodes): raise VerificationError('처리 지도 파일 누락')
+        if not flow.evidence_ids or not set(flow.evidence_ids)<=set(ev): raise VerificationError('처리 지도 근거 누락')
+        previous=flow.line
+        for step in flow.steps:
+            if step.id in step_ids:raise VerificationError('중복 처리 단계 ID')
+            step_ids.add(step.id)
+            if not (flow.line<=step.line<=step.end_line<=flow.end_line) or step.line<previous:
+                raise VerificationError('처리 단계 순서/범위 오류')
+            previous=step.line
+            if not step.evidence_ids or not set(step.evidence_ids)<=set(flow.evidence_ids):raise VerificationError('처리 단계 근거 누락')
+            if not set(step.node_ids)<=set(flow.node_ids):raise VerificationError('처리 단계 소속 오류')
+            for eid in step.evidence_ids:
+                e=ev[eid]
+                if e.path!=flow.path or not (step.line<=e.line<=step.end_line):raise VerificationError('처리 단계 범위 밖 근거')
+            for call in step.calls:
+                if call.evidence_id not in step.evidence_ids:raise VerificationError('호출 위치 근거 없음')
+                if call.callee_id and (call.callee_id not in flows or call.resolution!='static-candidate'):
+                    raise VerificationError('호출 대상 없음/실행 확정 과장')
+    for feature in result.features:
+        if not set(feature.flow_ids)<=set(flows):raise VerificationError('기능 처리 지도 누락')

@@ -35,6 +35,24 @@ def masks(text: str) -> tuple[str, str]:
             j = text.find('*/', i+2)
             j = len(text) if j < 0 else j+2
             blank(i, j, True); i = j
+        elif text[i] == '/' and (
+            not text[:i].rstrip() or text[:i].rstrip()[-1] in '=(:,[!&|?{;'
+            or re.search(r'\b(?:return|throw|case)\s*$', text[:i])
+        ):
+            # Common regex literal positions, not division. Mask escaped slashes
+            # and character classes so /fakeCall()/ never creates a call edge.
+            j=i+1;in_class=False
+            while j<len(text) and text[j] not in '\n\r':
+                if text[j]=='\\':j+=2;continue
+                if text[j]=='[':in_class=True
+                elif text[j]==']':in_class=False
+                elif text[j]=='/' and not in_class:break
+                j+=1
+            if j<len(text) and text[j]=='/':
+                j+=1
+                while j<len(text) and text[j].isalpha():j+=1
+                blank(i,j,True);i=j
+            else:i+=1
         elif text[i] in "'\"`":
             q = text[i]; j = i+1
             while j < len(text):
@@ -117,6 +135,8 @@ def extract_facts(snapshot: Snapshot) -> tuple[list[Fact], list[Evidence], list[
             tail = nc[m.end():m.end()+12]
             method = 'GET' if re.match(r'\s*\)', tail) else 'UNKNOWN'
             add(path,text,text.count('\n',0,m.start())+1,'request',m.group(1),'lexical',method)
+        for m in matches(r"\b(?:baseUrl|baseURL|base_url)\s*=\s*['\"](https?://[^'\"\n]+)['\"]"):
+            add(path,text,text.count('\n',0,m.start())+1,'config-url',m.group(1),'lexical')
         symbols = [r'\b(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(',
                    r'\bclass\s+([A-Za-z_$][\w$]*)',
                    r'\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?\([^\n;]*?\)\s*=>']

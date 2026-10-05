@@ -64,7 +64,7 @@ def technology(imports: list[str], needle: str) -> bool:
 
 def module_tag(path: str) -> str:
     p=path.lower()
-    names=[('auth','Auth'),('measurement','Measurement'),('algorithm','Algorithm'),('recommend','Recommendation'),('valid','Validation'),('storage','Storage'),('database','Storage'),('rule','Rules'),('session','Session'),('booking','Booking'),('feedback','Feedback')]
+    names=[('auth','Auth'),('fitrus','FITRUS'),('measurement','Measurement'),('algorithm','Algorithm'),('recommend','Recommendation'),('valid','Validation'),('storage','Storage'),('database','Storage'),('rule','Rules'),('session','Session'),('booking','Booking'),('feedback','Feedback')]
     return next((label for text,label in names if text in p),PurePosixPath(path).stem.replace('_',' ').replace('-',' ').title())
 
 def build_analysis(snapshot: Snapshot, facts: list[Fact], evidence: list[Evidence], warnings: list[str]) -> Analysis:
@@ -126,7 +126,7 @@ def build_analysis(snapshot: Snapshot, facts: list[Fact], evidence: list[Evidenc
                     add_edge(source,nid,'sdk','confirmed',[f.evidence_id],f'SDK/드라이버 import: {f.value}. 실제 배포 위치/연결 성공은 미확인입니다.')
                 elif f.value.startswith(('.', '@/','~/')):
                     unresolved.append(f'{f.path}: {f.value}')
-        elif f.kind=='request':
+        elif f.kind in {'request','config-url'}:
             parsed=urlparse(f.value)
             if parsed.scheme in {'https','http'} and parsed.hostname:
                 host=parsed.hostname
@@ -135,7 +135,7 @@ def build_analysis(snapshot: Snapshot, facts: list[Fact], evidence: list[Evidenc
                 if nid not in nodes:
                     nodes[nid]=Node(id=nid,label=host,kind='infrastructure',component_id='system-'+nid,role='infrastructure',description='코드에 명시된 외부 HTTP 목적지 · 실제 연결 미검증',evidence_ids=[f.evidence_id])
                 else: nodes[nid].evidence_ids.append(f.evidence_id)
-                add_edge(source,nid,'http-url','confirmed',[f.evidence_id],'코드에 절대 URL이 명시되어 있습니다. 해당 서비스를 호출하거나 가용성을 검사하지 않았습니다.')
+                add_edge(source,nid,'config-url' if f.kind=='config-url' else 'http-url','candidate' if f.kind=='config-url' else 'confirmed',[f.evidence_id], '기본 URL 설정입니다. 환경별 실제 목적지나 요청 성공은 확인하지 않았습니다.' if f.kind=='config-url' else '코드에 절대 URL이 명시되어 있습니다. 해당 서비스를 호출하거나 가용성을 검사하지 않았습니다.')
     # Match exact contract shape. Different origins may use identical paths: candidates only.
     routes=[f for f in facts if f.kind=='route']
     for req in (f for f in facts if f.kind=='request' and f.method in {'GET','POST','PUT','PATCH','DELETE','OPTIONS','HEAD'}):
@@ -168,7 +168,7 @@ def build_analysis(snapshot: Snapshot, facts: list[Fact], evidence: list[Evidenc
         else:
             label=labels[role];description=desc[role]
             tags=list(dict.fromkeys(module_tag(n.path) for n in members if role=='backend' and module_tag(n.path) not in {'Index','Main','App'}))
-            priorities={'Auth':0,'Measurement':1,'Algorithm':2,'Validation':3,'Storage':4}
+            priorities={'Auth':0,'FITRUS':1,'Measurement':2,'Algorithm':2,'Validation':3,'Storage':4}
             tags=sorted(tags,key=lambda t:priorities.get(t,10))[:6]
         system_nodes.append(Node(id=cid,label=label,kind='component',role=role,description=description,
                                  evidence_ids=list(dict.fromkeys(e for n in members for e in n.evidence_ids)),member_ids=[n.id for n in members],tags=tags))
@@ -243,6 +243,10 @@ def build_analysis(snapshot: Snapshot, facts: list[Fact], evidence: list[Evidenc
     if not features:
         output_warnings.append('지원 패턴의 API endpoint를 찾지 못했습니다. 기능별 흐름을 임의로 만들지 않았습니다.')
     summary=f'{len(source_files)}개 소스 파일을 {len(system_nodes)-1 if system_nodes else 0}개 핵심 영역으로 압축했습니다. {len(features)}개 API 기능을 탐색할 수 있습니다.'
-    return Analysis(name=snapshot.name,source=snapshot.source,revision=snapshot.revision,repository_url=snapshot.repository_url,coverage=snapshot.coverage,
+    result = Analysis(name=snapshot.name,source=snapshot.source,revision=snapshot.revision,repository_url=snapshot.repository_url,coverage=snapshot.coverage,
                     nodes=list(nodes.values()),edges=list(edges.values()),system_nodes=system_nodes,system_edges=list(system_edges.values()),features=features,
                     evidence=list(evidence_map.values()),facts=facts,warnings=list(dict.fromkeys(output_warnings)),summary=summary)
+
+    from .process import project_processes
+    project_processes(result, snapshot)
+    return result

@@ -31,6 +31,8 @@ def validate(result,owner,repo):
         for domain in ('/auth/','/fitrus/','/recommendations/'):
             assert any(domain in label for label in endpoints),f'Missing feature: {domain}'
         assert any(e['relation']=='http-contract' for e in result['edges']),'No HTTP candidates'
+        from acceptance_flow import validate_semantics
+        validate_semantics(result)
 
 
 def main():
@@ -72,7 +74,7 @@ def main():
                 (out.parent/'zip-analysis.json').write_text(json.dumps(zipped,ensure_ascii=False,indent=2),encoding='utf-8')
                 report['checks'].append(summarize(zipped))
                 report['zip_source_commit']=sha
-                report['comparison']='Same source commit; 48 remote / 160 ZIP file budgets. Core layers and feature domains checked independently.'
+                report['comparison']='Same source commit; 160 remote / 160 ZIP file budgets. Core layers and feature domains checked independently.'
         report['ok']=True
     except Exception as exc:
         report['error']=f'{type(exc).__name__}: {exc}'

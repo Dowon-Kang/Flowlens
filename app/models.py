@@ -50,7 +50,7 @@ class Evidence(Model):
 
 class Fact(Model):
     path: str
-    kind: Literal["import", "route", "request", "symbol"]
+    kind: Literal["import", "route", "request", "symbol", "config-url"]
     value: str
     evidence_id: str
     method: str = ""
@@ -77,7 +77,39 @@ class Edge(Model):
     evidence_ids: list[str]
     description: str
 
+class CallSite(Model):
+    name: str
+    evidence_id: str
+    callee_id: str = ""
+    resolution: Literal["unresolved", "static-candidate"] = "unresolved"
+
+class ProcessStep(Model):
+    id: str
+    label: str
+    category: str
+    line: int
+    end_line: int
+    evidence_ids: list[str]
+    node_ids: list[str]
+    calls: list[CallSite] = Field(default_factory=list)
+    conditional: bool = False
+    description: str = "식별자·문장 형태 기반 요약 · 실제 실행 미검증"
+
+class ProcessFlow(Model):
+    id: str
+    label: str
+    path: str
+    line: int
+    end_line: int
+    kind: Literal["route", "function", "sdk"]
+    node_ids: list[str]
+    evidence_ids: list[str]
+    steps: list[ProcessStep]
+    order: Literal["source-order"] = "source-order"
+    warnings: list[str] = Field(default_factory=list)
+
 class Feature(Model):
+    flow_ids: list[str] = Field(default_factory=list)
     id: str
     label: str
     description: str
@@ -103,7 +135,8 @@ class Explanation(Model):
     node_summaries: list[NodeExplanation] = Field(max_length=12)
 
 class Analysis(Model):
-    schema_version: str = "1.0"
+    flows: list[ProcessFlow] = Field(default_factory=list)
+    schema_version: str = "1.1"
     analyzer_version: str = __version__
     name: str
     source: str

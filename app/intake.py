@@ -14,7 +14,7 @@ import httpx
 from .models import Coverage, Snapshot, SourceFile
 
 MAX_FILES = 160
-MAX_REMOTE_FILES = 48
+MAX_REMOTE_FILES = 160
 MAX_FILE_BYTES = 64 * 1024
 MAX_TOTAL_BYTES = 2 * 1024 * 1024
 MAX_ZIP_BYTES = 12 * 1024 * 1024

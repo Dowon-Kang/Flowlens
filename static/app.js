@@ -1,6 +1,6 @@
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state = { data: null, mode: 'system', feature: null, selected: null, page: 'explorer', busy: false, zoom: 1, pan: {x:0,y:0}, layout: null, toastTimer: null };
+const state = { detail: 'steps', flow: null, trail: [], allSteps: false, data: null, mode: 'system', feature: null, selected: null, page: 'explorer', busy: false, zoom: 1, pan: {x:0,y:0}, layout: null, toastTimer: null };
 const roleLabels = {user:'ENTRY POINT',app:'PRESENTATION',state:'STATE & CONTROL',transport:'NETWORK LAYER',backend:'APPLICATION',modules:'MODULES',infrastructure:'INFRASTRUCTURE'};
 const roleIcons = {user:'U',app:'UI',state:'ST',transport:'IO',backend:'API',modules:'M',infrastructure:'EXT'};
 const order = {user:0,app:1,state:2,transport:3,backend:4,modules:5,infrastructure:6};
@@ -16,7 +16,7 @@ async function analyze(payload) {
     const response=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...payload,explain:$('explainToggle').checked}),signal:AbortSignal.timeout(150000)});
     const data=await response.json();
     if(!response.ok) throw new Error(data.error || `분석 실패 (HTTP ${response.status})`);
-    state.data=data; state.feature=null; state.selected=null; state.mode='system'; state.zoom=1; state.pan={x:0,y:0};
+    resetProcess(); state.data=data; state.feature=null; state.selected=null; state.mode='system'; state.zoom=1; state.pan={x:0,y:0};
     document.querySelectorAll('[data-demo]').forEach(b=>b.classList.toggle('selected',payload.source==='demo' && b.dataset.demo===(payload.demo || 'mobile')));
     state.page='explorer'; render();
     if(data.coverage.partial) notice(`부분 분석: 지원 후보 ${data.coverage.eligible}개 중 ${data.coverage.analyzed}개 파일을 읽었습니다. 생략 ${data.coverage.omitted}개, 실패 ${data.coverage.failed}개. 분석 과정에서 전체 범위를 확인하세요.`);
@@ -35,7 +35,7 @@ async function analyzeZip(file) {
     const response=await fetch('/api/analyze-zip?'+params.toString(),{method:'POST',headers:{'Content-Type':file.type||'application/zip'},body:file,signal:AbortSignal.timeout(150000)});
     const data=await response.json();
     if(!response.ok) throw new Error(data.error || `ZIP 분석 실패 (HTTP ${response.status})`);
-    state.data=data; state.feature=null; state.selected=null; state.mode='system'; state.zoom=1; state.pan={x:0,y:0};
+    resetProcess(); state.data=data; state.feature=null; state.selected=null; state.mode='system'; state.zoom=1; state.pan={x:0,y:0};
     document.querySelectorAll('[data-demo]').forEach(b=>b.classList.remove('selected'));
     state.page='explorer'; render();
     if(data.coverage.partial) notice(`부분 분석: ZIP 내부 ${data.coverage.discovered}개 파일 중 지원 후보 ${data.coverage.eligible}개, 실제 분석 ${data.coverage.analyzed}개입니다.`);
@@ -45,10 +45,11 @@ async function analyzeZip(file) {
 }
 
 function currentFeature() { return state.data?.features.find(f=>f.id===state.feature); }
-function showFeature(id) { state.feature=id; state.mode='feature'; state.selected=null; state.page='explorer'; state.zoom=1; state.pan={x:0,y:0}; render(); }
-function showSystem() { state.mode='system';state.feature=null;state.selected=null;state.page='explorer';state.zoom=1;state.pan={x:0,y:0};render(); }
+function showFeature(id) { resetProcess();state.feature=id;state.flow=currentFeature()?.flow_ids?.[0]||null; state.mode='feature'; state.selected=null; state.page='explorer'; state.zoom=1; state.pan={x:0,y:0}; render(); }
+function showSystem() { resetProcess();state.mode='system';state.feature=null;state.selected=null;state.page='explorer';state.zoom=1;state.pan={x:0,y:0};render(); }
 function graphData() {
   const d=state.data; const feature=currentFeature();
+  if(state.mode==='feature' && feature && state.detail==='steps' && currentFlow())return processGraph(currentFlow());
   if(state.mode==='feature' && feature) return {nodes:d.nodes.filter(n=>feature.node_ids.includes(n.id)),edges:d.edges.filter(e=>feature.edge_ids.includes(e.id))};
   return {nodes:d.system_nodes,edges:d.system_edges};
 }
@@ -56,7 +57,7 @@ function graphData() {
 function render() {
   if(!state.data) return;
   const d=state.data, feature=currentFeature();
-  $('topRepo').textContent=d.name;
+  $('topRepo').textContent=d.name;document.querySelector('.version').textContent='v'+d.analyzer_version;
   $('repoName').textContent=d.name;
   $('revision').textContent='#'+d.revision.slice(0,8);
   $('revision').title=d.revision;
@@ -77,6 +78,15 @@ function render() {
   $('validationStatus').textContent='구조·근거 일관성 검사 통과 · 런타임 미검증';
   $('coverageStatus').textContent=`${d.coverage.analyzed} files  /  ${d.evidence.length} evidence  /  ${d.coverage.partial?'부분 분석':'수집 범위 분석'}`;
   $('modePill').innerHTML=`<i></i> ${d.explanation?'AI-ASSISTED EXPLANATION':'STATIC ANALYSIS'}`;
+  renderProcessTools();
+  if(feature&&state.detail==='steps'){
+    const flow=currentFlow();
+    $('canvasTitle').textContent=flow?`${feature.label} → ${flow.kind==='function'?flow.label:'핵심 처리 단계'}`:'지원되지 않는 본문';
+    $('canvasSubtitle').textContent='소스 읽기 순서 · 조건/예외 포함 · 실행 관측 아님';
+    $('viewMeta').textContent=flow?`${graphData().nodes.length}개 요약 / ${flow.steps.length}개 단계`:'본문 범위 미확인';
+    if(state.trail.length)$('featureContext').innerHTML+='<button class="context-chip" data-flow-back>← 상위 처리로</button>';
+  }
+  document.querySelector('.graph-legend').innerHTML=feature&&state.detail==='steps'?'<span><i class="legend-line dashed"></i>소스 읽기 순서 · 실행 보증 아님</span>':'<span><i class="legend-line"></i>정적 관계</span><span><i class="legend-line dashed"></i>연결 후보</span>';
   renderGraph(); renderPanel(); renderPipeline();
 }
 
@@ -93,6 +103,10 @@ function calculateLayout(nodes, edges) {
     const sideStart=Math.max(240, y-110-infrastructure.length*160);
     infrastructure.forEach((n,i)=>positions.set(n.id,{x:520,y:sideStart+i*180,w:258,h:108}));
     return {positions,w:885,h:Math.max(y+35,sideStart+infrastructure.length*180+90,600)};
+  }
+  if(state.detail==='steps'&&currentFlow()){
+    nodes.forEach((n,i)=>{const row=Math.floor(i/2),col=row%2===0?i%2:1-i%2;positions.set(n.id,{x:40+col*372,y:76+row*148,w:320,h:108});});
+    return {positions,w:780,h:Math.max(600,190+Math.ceil(nodes.length/2)*148)};
   }
   // File-level layout. Layering is visual organization, not a claimed call sequence.
   const rank=new Map(nodes.map(n=>[n.id,({app:0,state:1,transport:2,backend:3,modules:3,infrastructure:6})[n.role]??3]));
@@ -126,6 +140,11 @@ function calculateLayout(nodes, edges) {
 }
 
 function nodeSvg(node, p) {
+  if(node.kind==='process'){
+    const chosen=state.selected?.id===node.id;
+    const label=truncate(node.label,23);
+    return `<g class="svg-node" data-node="${esc(node.id)}" tabindex="0" role="button" aria-label="${esc(node.label)} 근거 보기" transform="translate(${p.x},${p.y})"><title>${esc(node.description)}</title><rect class="node-box" width="${p.w}" height="${p.h}" rx="13" fill="${chosen?'#f4f0ff':'#fff'}" stroke="${chosen?'#7865d3':'#ddd9e9'}" filter="url(#node-shadow)"/><text x="17" y="25" font-size="12" fill="#776798" font-family="system-ui">${String(node.index).padStart(2,'0')} · ${node.steps.length>1?'요약 묶음':'처리 단계'}</text>${node.conditional?`<text x="${p.w-18}" y="25" text-anchor="end" font-size="10" fill="#9a753e" font-family="system-ui">조건/분기 포함</text>`:''}<text x="17" y="56" font-size="18" font-weight="600" fill="#332c45" font-family="system-ui">${esc(label)}</text><text x="17" y="80" font-size="11" fill="#787084" font-family="system-ui">${esc(node.description)} · 눌러서 근거 보기</text></g>`;
+  }
   const chosen=state.selected?.type==='node' && state.selected.id===node.id;
   const infra=node.role==='infrastructure', virtual=node.kind==='virtual';
   const border=chosen?'#8a79df':infra?'#d7e5df':'#e0ddec';
@@ -154,9 +173,9 @@ function edgeSvg(edge, layout) {
   let ax,ay,bx,by,path,lx,ly;
   const side=state.mode==='system'&&b.x>a.x+100;
   if(side){ax=a.x+a.w;ay=a.y+a.h/2;bx=b.x;by=b.y+b.h/2;const mx=(ax+bx)/2;path=`M${ax},${ay} C${mx},${ay} ${mx},${by} ${bx},${by}`;lx=mx;ly=(ay+by)/2;}
-  else if(Math.abs(a.y-b.y)<20){ax=a.x+a.w;ay=a.y+a.h*.54;bx=b.x;by=b.y+b.h*.54;path=`M${ax},${ay} C${ax+25},${ay+44} ${bx-25},${by+44} ${bx},${by}`;lx=(ax+bx)/2;ly=ay+33;}
+  else if(Math.abs(a.y-b.y)<20){ax=b.x>a.x?a.x+a.w:a.x;ay=a.y+a.h*.54;bx=b.x>a.x?b.x:b.x+b.w;by=b.y+b.h*.54;path=`M${ax},${ay} C${ax+25},${ay+44} ${bx-25},${by+44} ${bx},${by}`;lx=(ax+bx)/2;ly=ay+33;}
   else{ax=a.x+a.w/2;ay=a.y+a.h;bx=b.x+b.w/2;by=b.y;const my=(ay+by)/2;path=`M${ax},${ay} C${ax},${my} ${bx},${my} ${bx},${by}`;lx=(ax+bx)/2;ly=my;}
-  let label=({import:'import',sdk:'SDK', 'http-contract':'HTTP · 후보','http-url':'HTTP','entry-model':'요청 · 설명용'})[edge.relation] || edge.relation;
+  let label=({import:'import',sdk:'SDK', 'http-contract':'HTTP · 후보','http-url':'HTTP','entry-model':'요청 · 설명용','source-order':'읽기 순서','config-url':'기본 URL · 후보'})[edge.relation] || edge.relation;
   const showLabel=edge.relation!=='import'||state.mode==='system'||selected;
   return `<g data-edge="${esc(edge.id)}" tabindex="0" role="button" aria-label="${esc(label)} 연결 근거 보기"><title>${esc(edge.description)}</title><path class="svg-edge-hit" d="${path}" fill="none" stroke="transparent" stroke-width="18"/><path d="${path}" fill="none" stroke="${color}" stroke-width="${selected?2:1.5}" ${candidate?'stroke-dasharray="5 5"':''} marker-end="url(#${candidate?'arrow-candidate':'arrow'})" pointer-events="none"/>${showLabel?`<rect x="${lx-39}" y="${ly-9}" width="78" height="18" rx="6" fill="#fcfbfe"/><text x="${lx}" y="${ly+3}" text-anchor="middle" font-size="8" font-family="system-ui" fill="${candidate?'#b29d74':'#b0a4bf'}" pointer-events="none">${esc(label)}</text>`:''}</g>`;
 }
@@ -169,11 +188,12 @@ function renderGraph() {
   applyZoom();
 }
 function applyZoom(){if(!state.layout)return;const {w,h}=state.layout;const vw=w/state.zoom,vh=h/state.zoom;const x=(w-vw)/2+state.pan.x,y=(h-vh)/2+state.pan.y;$('graph').setAttribute('viewBox',`${x} ${y} ${vw} ${vh}`);$('zoomLabel').textContent=Math.round(state.zoom*100)+'%';}
-function featureCards(features){return features.map(f=>`<button class="feature-card" data-feature="${esc(f.id)}"><div class="card-top">${esc(f.label)}<span>↗</span></div><code>${esc(f.endpoint_labels[0]||'API')}</code><small>${f.node_ids.length}개 관련 노드 · ${f.endpoint_labels.length}개 endpoint</small></button>`).join('');}
+function featureCards(features){return features.map(f=>`<button class="feature-card" data-feature="${esc(f.id)}"><div class="card-top">${esc(f.label)}<span>↗</span></div><code>${esc(f.endpoint_labels[0]||'API')}</code><small>${f.flow_ids?.length||0}개 처리 흐름 · ${f.node_ids.length}개 관련 파일/서비스</small></button>`).join('');}
 function evidenceHtml(ids){const ev=new Map(state.data.evidence.map(e=>[e.id,e]));return [...new Set(ids)].slice(0,10).map(id=>{const e=ev.get(id);if(!e)return '';const url=e.url.startsWith('https://github.com/')?e.url:'';return `<article class="code-evidence"><div class="evidence-header">${esc(e.path)}<br>L${e.line}${e.end_line!==e.line?'–'+e.end_line:''}${url?`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">고정 커밋에서 보기 ↗</a>`:''}</div><pre>${esc(e.snippet)}</pre><div class="evidence-kind">${esc(e.kind)} · ${esc(e.parser)} · ${esc(e.id.slice(-7))}</div></article>`;}).join('')+(new Set(ids).size>10?`<p class="panel-description">근거 ${new Set(ids).size}개 중 10개를 표시했습니다. 전체는 JSON 내보내기에 포함됩니다.</p>`:'');}
 
 function renderPanel(){
   const d=state.data,panel=$('detailPanel'),feature=currentFeature();if(!d)return;
+  if(feature&&state.detail==='steps')return renderProcessPanel();
   if(state.selected){
     const {nodes,edges}=graphData();const item=state.selected.type==='node'?nodes.find(n=>n.id===state.selected.id):edges.find(e=>e.id===state.selected.id);
     if(!item){state.selected=null;return renderPanel();}
@@ -206,7 +226,7 @@ function exportFile(kind){
   if(kind==='md'){
     const {nodes,edges}=graphData();const ids=new Map(nodes.map((n,i)=>[n.id,'n'+i]));const safeLabel=s=>String(s).replace(/[`"<>\[\]{}|\\\n\r]/g,' ').slice(0,80);
     const diagram=['flowchart TD',...nodes.map(n=>`  ${ids.get(n.id)}["${safeLabel(n.label)}"]`),...edges.map(e=>`  ${ids.get(e.source)} ${e.confidence==='candidate'?'-.->':'-->'} ${ids.get(e.target)}`)].join('\n');
-    const md=`# ${d.name}\n\n${d.summary}\n\nRevision: ${d.revision}\nAnalyzer: ${d.analyzer_version}\nMode: ${state.mode}\n\n> Static relationships are not proof of runtime execution. Dashed edges are candidates.\n\n\`\`\`mermaid\n${diagram}\n\`\`\`\n\n## Coverage\n\n${d.coverage.analyzed} of ${d.coverage.eligible} eligible files read. ${d.coverage.omitted} omitted, ${d.coverage.failed} failed.\n\n## Limitations\n\n${d.warnings.map(w=>'- '+w).join('\n')}\n\n## Source evidence\n\n${d.evidence.map(e=>'- '+e.path.replace(/[\n\r`]/g,' ')+' : L'+e.line+'–L'+e.end_line+' ('+e.kind+', '+e.parser+')').join('\n')}\n`;
+    const md=`# ${d.name}\n\n${d.summary}\n\nRevision: ${d.revision}\nAnalyzer: ${d.analyzer_version}\nMode: ${state.mode}\n\n> Static relationships are not proof of runtime execution. Processing-view edges mean source reading order, not a proven execution path. Branches and early returns may skip later steps. Other dashed edges are candidates.\n\n\`\`\`mermaid\n${diagram}\n\`\`\`\n\n## Coverage\n\n${d.coverage.analyzed} of ${d.coverage.eligible} eligible files read. ${d.coverage.omitted} omitted, ${d.coverage.failed} failed.\n\n## Limitations\n\n${d.warnings.map(w=>'- '+w).join('\n')}\n\n## Source evidence\n\n${d.evidence.map(e=>'- '+e.path.replace(/[\n\r`]/g,' ')+' : L'+e.line+'–L'+e.end_line+' ('+e.kind+', '+e.parser+')').join('\n')}\n`;
     download(base+'.md',md,'text/markdown');
   }
   $('exportMenu').classList.add('hidden');$('exportButton').setAttribute('aria-expanded','false');
@@ -236,6 +256,12 @@ $('folderInput').addEventListener('change',async event=>{
   event.target.value='';
 });
 document.addEventListener('click',event=>{
+  const detail=event.target.closest('[data-detail]');if(detail){state.detail=detail.dataset.detail;state.selected=null;state.zoom=1;state.pan={x:0,y:0};render();return;}
+  const callee=event.target.closest('[data-callee]');if(callee)return chooseFlow(callee.dataset.callee,true);
+  const back=event.target.closest('[data-flow-back]');if(back){const id=state.trail.pop();if(id){state.flow=id;state.allSteps=false;state.selected=null;render();}return;}
+  const step=event.target.closest('[data-step]');if(step){state.selected={type:'node',id:step.dataset.step};renderGraph();renderPanel();$('detailPanel').scrollTop=0;return;}
+  if(event.target.closest('[data-toggle-steps]')){state.allSteps=!state.allSteps;state.selected=null;state.zoom=1;render();return;}
+
   const demo=event.target.closest('[data-demo]');if(demo)return analyze({source:'demo',demo:demo.dataset.demo});
   const feature=event.target.closest('[data-feature]');if(feature)return showFeature(feature.dataset.feature);
   const action=event.target.closest('[data-action]');if(action){if(action.dataset.action==='system')showSystem();else{state.selected=null;renderGraph();renderPanel();}return;}
@@ -265,4 +291,66 @@ $('graph').addEventListener('pointerup',()=>drag=null);
 $('graph').addEventListener('pointercancel',()=>drag=null);
 $('explainToggle').addEventListener('change',()=>{if($('explainToggle').checked)toast('다음 분석에서 일부 코드 근거를 OpenAI로 전송합니다. 비밀 값을 먼저 제거하세요.');});
 fetch('/api/health').then(r=>r.json()).then(d=>{$('aiNote').textContent=d.ai_configured?'선택 시 일부 코드 근거가 OpenAI로 전송됩니다.':'API 키 없이 정적 분석 · AI 설명은 서버 키/모델 설정 후 사용';}).catch(()=>{});
+// Scope-based processing view. Visual groups only fold contiguous source steps.
+function currentFlow(){return state.data?.flows?.find(f=>f.id===state.flow);}
+function resetProcess(){state.detail='steps';state.flow=null;state.trail=[];state.allSteps=false;}
+function chooseFlow(id,fromCall=false){
+  if(fromCall&&state.flow)state.trail.push(state.flow);
+  else if(!fromCall)state.trail=[];
+  state.flow=id;state.detail='steps';state.selected=null;state.allSteps=false;state.zoom=1;state.pan={x:0,y:0};render();
+}
+function stepGroups(flow){
+  let groups=flow.steps.map(step=>[step]);
+  if(state.allSteps)return groups;
+  const cost=(a,b)=>{
+    const cats=new Set([...a,...b].map(s=>s.category));
+    if(cats.size===1)return 0;
+    if(cats.has('response'))return 50+a.length+b.length;
+    if(cats.has('recommend')||cats.has('safety'))return 30+a.length+b.length;
+    if(cats.has('validate')&&(cats.has('read')||cats.has('rules')||cats.has('calculate')))return 1+cats.size+a.length+b.length;
+    return 10+cats.size+a.length+b.length;
+  };
+  while(groups.length>8){let i=0;for(let j=1;j<groups.length-1;j++)if(cost(groups[j],groups[j+1])<cost(groups[i],groups[i+1]))i=j;groups.splice(i,2,[...groups[i],...groups[i+1]]);}
+  return groups;
+}
+function groupLabel(group){
+  const kinds=new Set(group.map(s=>s.category));
+  if(kinds.size===1)return group[0].label;
+  const words={auth:'인증',validate:'검증',read:'조회',rules:'규칙',normalize:'정규화',calculate:'계산',recommend:'추천 계산',classify:'등급',safety:'안전 확인',adjust:'계수 조정',write:'저장',network:'외부 요청',token:'허가',response:'결과 반환',prepare:'준비',select:'설정'};
+  return [...kinds].map(k=>words[k]||k).join(' · ');
+}
+function processGraph(flow){
+  const file=state.data.nodes.find(n=>n.path===flow.path);
+  const groups=stepGroups(flow);
+  const nodes=groups.map((steps,i)=>({id:'view-'+steps[0].id,label:groupLabel(steps),kind:'process',role:'process',component_id:file?.component_id||'',path:flow.path,steps,
+    description:`L${steps[0].line}–${steps.at(-1).end_line} · ${steps.length}개 세부 단계`,
+    evidence_ids:[...new Set(steps.flatMap(s=>s.evidence_ids))],member_ids:[],tags:[],index:i+1,
+    conditional:steps.some(s=>s.conditional)}));
+  const edges=nodes.slice(1).map((n,i)=>({id:'reading-'+n.id,source:nodes[i].id,target:n.id,relation:'source-order',confidence:'candidate',evidence_ids:[nodes[i].evidence_ids[0],n.evidence_ids[0]],description:'소스에 적힌 순서로 읽기 위한 연결입니다. 실행·성공 경로가 아닙니다. 분기, 반복, 예외 또는 조기 반환으로 이후 단계는 실행되지 않을 수 있습니다.'}));
+  return {nodes,edges};
+}
+function renderProcessTools(){
+  const el=$('processTools'),f=currentFeature(),flow=currentFlow();
+  el.classList.toggle('hidden',!f);
+  if(!f)return;
+  const variants=(f.flow_ids||[]).map(id=>state.data.flows.find(x=>x.id===id)).filter(Boolean);
+  el.innerHTML=`<div class="process-modes"><button data-detail="steps" class="${state.detail==='steps'?'active':''}">처리 단계</button><button data-detail="files" class="${state.detail==='files'?'active':''}">파일 참고도</button></div>${variants.length?`<label class="variant-label">진입점 <select id="flowVariant" aria-label="기능 진입점">${variants.map(v=>`<option value="${esc(v.id)}" ${v.id===(state.trail[0]||state.flow)?'selected':''}>${esc(v.label)}</option>`).join('')}</select></label>`:''}${state.detail==='steps'&&flow?`<button class="button subtle compact" data-toggle-steps>${state.allSteps?'핵심만 접어 보기':`전체 ${flow.steps.length}단계 보기`}</button>`:''}`;
+  $('flowVariant')?.addEventListener('change',e=>chooseFlow(e.target.value));
+}
+function renderProcessPanel(){
+  const flow=currentFlow(),feature=currentFeature(),panel=$('detailPanel');
+  if(!flow){panel.innerHTML='<h3>본문 범위 미확인</h3><p class="panel-description">처리 단계를 만들지 않았습니다. 파일 참고도에서 원본 근거를 확인하세요.</p><button data-detail="files" class="button">파일 참고도</button>';return;}
+  const selected=graphData().nodes.find(n=>n.id===state.selected?.id);
+  if(state.selected?.type==='edge'){
+    const edge=graphData().edges.find(e=>e.id===state.selected.id);
+    panel.innerHTML=`<button class="panel-back" data-action="clear">← 처리 요약</button><div class="panel-eyebrow">READING ORDER · 실행 경로 아님</div><h3>소스 순서 연결</h3><p class="panel-description">${esc(edge?.description)}</p>${evidenceHtml(edge?.evidence_ids||[])}`;return;
+  }
+  if(selected){
+    const targets=[...new Set(selected.steps.flatMap(s=>s.calls.map(c=>c.callee_id)).filter(Boolean))].map(id=>state.data.flows.find(f=>f.id===id)).filter(Boolean);
+    panel.innerHTML=`<button class="panel-back" data-action="clear">← 처리 요약</button><div class="panel-eyebrow">PROCESS EVIDENCE</div><h3>${esc(selected.label)}</h3><span class="confidence-pill candidate">규칙 기반 요약 · 실행 미검증</span><p class="panel-description">${esc(flow.label)}<br>${esc(flow.path)}<br>${esc(selected.description)}</p>${targets.length?`<div class="panel-eyebrow">호출 대상 내부 펼치기 · 정적 후보</div>${targets.map(t=>`<button class="feature-card" data-callee="${esc(t.id)}"><div class="card-top">${esc(t.label)}<span>↘</span></div><small>${esc(t.path)} · L${t.line}</small></button>`).join('')}`:''}<div class="panel-divider"></div>${selected.steps.map(s=>`<section class="step-detail"><h4>${esc(s.label)} <small>L${s.line}–${s.end_line}</small></h4>${s.conditional?'<div class="branch-note">조건·반복·콜백 또는 조기 반환이 포함될 수 있습니다.</div>':''}${evidenceHtml(s.evidence_ids)}<details class="calls-list"><summary>소스에서 찾은 호출 ${s.calls.length}개</summary>${s.calls.map(c=>`<div><code>${esc(c.name)}</code><small>${c.callee_id?'정적 연결 후보':'대상 미해결 / 외부 호출'}</small></div>`).join('')}</details></section>`).join('')}`;
+  }else{
+    panel.innerHTML=`<div class="panel-eyebrow">FEATURE → PROCESS → CODE</div><h3>${esc(feature.label)}</h3><p class="panel-description">현재: <strong>${esc(flow.label)}</strong><br>이 본문에서 발견한 처리를 요약했습니다. 단계 클릭 → 근거 확인 → 연결 가능한 함수 내부 순으로 탐색하세요.</p><div class="scope-box"><code>${esc(flow.path)}</code><span>L${flow.line}–${flow.end_line} · ${flow.steps.length}개 세부 단계</span></div><div class="confidence-note warn">화살표는 <strong>소스 읽기 순서</strong>입니다. 분기·오류·조기 반환으로 실제 실행 경로는 달라집니다.</div>${state.trail.length?'<button class="button" data-flow-back>← 상위 처리로 돌아가기</button>':''}<div class="panel-divider"></div><div class="panel-eyebrow">단계 바로가기</div>${graphData().nodes.map(n=>`<button class="process-shortcut" data-step="${esc(n.id)}"><b>${String(n.index).padStart(2,'0')}</b><span>${esc(n.label)}</span><small>${n.conditional?'분기 포함':'코드 근거'}</small></button>`).join('')}<div class="panel-divider"></div><ul class="warning-list">${flow.warnings.map(w=>`<li>${esc(w)}</li>`).join('')}</ul><button class="button subtle" data-detail="files">파일·HTTP 관계는 별도 참고도에서 →</button>`;
+  }
+}
+
 analyze({source:'demo',demo:'mobile'});

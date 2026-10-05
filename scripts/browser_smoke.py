@@ -48,7 +48,9 @@ def main():
         page.locator('#detailPanel [data-feature]').filter(has_text='측정 데이터').click()
         assert '측정 데이터' in page.locator('#canvasTitle').inner_text()
         assert page.locator('#featureContext').is_visible()
-        assert page.locator('#graph [data-node]').count()>7
+        assert 1 <= page.locator('#graph [data-node]').count() <= 8
+        assert page.locator('#processTools').is_visible()
+        page.locator('#processTools [data-detail="files"]').click()
         checks.append('Feature view: selected feature slice and parent context visible')
         page.screenshot(path=str(out/'feature-flow.png'),full_page=True)
         page.locator('#graph [data-node]').filter(has=page.locator('title',has_text='measurement-service.ts')).first.click()
@@ -68,7 +70,7 @@ def main():
         for kind in ['json','svg','md']:
             page.locator('#exportButton').click();page.locator('[data-export="'+kind+'"]').click()
         exports=page.evaluate('Promise.all(window.__exports.map(b=>b.text()))')
-        assert json.loads(exports[0])['schema_version']=='1.0'
+        assert json.loads(exports[0])['schema_version']=='1.1'
         assert '<svg' in exports[1] and 'flowchart TD' in exports[2]
         checks.append('JSON, SVG and Markdown export payloads (not OS save dialog)')
         page.locator('#pipelineNav').click()

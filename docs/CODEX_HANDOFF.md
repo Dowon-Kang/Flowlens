@@ -1,3 +1,5 @@
+> **v0.3 갱신:** 아래 초기 설계 중 파일 중심 Feature Flow는 `docs/CYCLE_04_CONTRACT.md`로 대체합니다. 현재 계약은 schema 1.1: System Flow → API/SDK 본문 처리 단계 → 함수 내부/근거. 파일 그래프는 보조 보기입니다. 제품 파이프라인의 BUILD에서 `process.py`가 같은 근거 그래프에 본문 범위를 투영합니다. 단계 이름은 규칙 기반 해석, 선은 소스 읽기 순서, 호출 대상은 정적 후보입니다. 실제 실행/성공을 증명하지 않습니다. GitHub 수집 예산은 160파일(총 2 MiB)입니다.
+
 # Codex 인계
 
 AGENTS.md, docs/PROJECT.md, docs/ARCHITECTURE.md, docs/CONTRACTS.md, docs/EXECUTION_VALIDATION.md를 먼저 읽고 `.agents/skills/`의 두 절차를 적용한다.
