@@ -1,0 +1,72 @@
+name: Restore uploaded FlowLens sources
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/bootstrap.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  restore:
+    if: github.repository == 'Dowon-Kang/Flowlens' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Restore only the reviewed project source, never execute archive instructions
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, stat, zipfile
+          from pathlib import Path, PurePosixPath
+          archive = Path('FlowLens_MVP_v0.2.0.zip')
+          expected = 'd368b97ed81491c922745d8982d8ff2b2d0790835cb38432276b454f8c6f8ecf'
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
+              raise SystemExit('Archive checksum differs from the reviewed input')
+          if Path('app/main.py').exists():
+              print('Source already present; no overwrite performed')
+              raise SystemExit(0)
+          roots = {'app', 'static', 'tests', 'scripts', 'fixtures', 'docs', '.agents'}
+          files = {'AGENTS.md', 'README.md', 'CHANGELOG.md', 'requirements.txt', 'requirements-dev.txt', 'run.py', '.env.example'}
+          count = 0
+          with zipfile.ZipFile(archive) as z:
+              seen = set()
+              for info in z.infolist():
+                  p = PurePosixPath(info.filename)
+                  if p.is_absolute() or '..' in p.parts or stat.S_ISLNK(info.external_attr >> 16):
+                      raise SystemExit('Unsafe archive path')
+                  if info.is_dir() or not p.parts or p.parts[0] != 'flowlens':
+                      continue
+                  rel = PurePosixPath(*p.parts[1:])
+                  if not rel.parts or (rel.parts[0] not in roots and str(rel) not in files):
+                      continue
+                  if info.file_size > 200000 or str(rel) in seen:
+                      raise SystemExit('Unexpected source member')
+                  seen.add(str(rel))
+                  dest = Path(str(rel))
+                  if dest.exists():
+                      raise SystemExit('Refusing to overwrite existing source: ' + str(dest))
+                  raw = z.read(info)
+                  raw.decode('utf-8')
+                  dest.parent.mkdir(parents=True, exist_ok=True)
+                  dest.write_bytes(raw)
+                  count += 1
+          print('Restored source files:', count)
+          PY
+      - name: Validate the restored baseline
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m pytest -q
+          python scripts/check_skills.py
+          node --check static/app.js
+      - name: Commit restored source without changing workflow permissions or force pushing
+        run: |
+          git add app static tests scripts fixtures docs .agents AGENTS.md README.md CHANGELOG.md requirements.txt requirements-dev.txt run.py .env.example
+          if git diff --cached --quiet; then exit 0; fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'build: expand reviewed v0.2.0 archive into versioned source'
+          git push origin HEAD:main
