@@ -1,0 +1,7 @@
+{
+  "name": "flowcare-demo",
+  "dependencies": {
+    "hono": "*",
+    "@supabase/supabase-js": "*"
+  }
+}

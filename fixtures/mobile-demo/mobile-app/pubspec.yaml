@@ -1,0 +1,7 @@
+name: flowcare_demo
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: any
+  dio: any
+  supabase_flutter: any
