@@ -5,4 +5,7 @@ __pycache__/
 .env.*
 !.env.example
 *.pyc
-evidence/live-*
+evidence/latest/
+evidence/ci-*/
+evidence/cycle-*/
+demo.html

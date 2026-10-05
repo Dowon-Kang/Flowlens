@@ -1,139 +1,46 @@
-# FlowLens v0.2.0 실행 검증 기록
+# FlowLens v0.2.1 실행 검증 — Cycle 03
 
-검증 일자: 2026-10-06
+검증: 2026-10-06 KST. 대상: `Dowon-Kang/Flowlens`.
+검증된 소스 commit: `5923cc4d96b6ee9a020a0ec6d0a43be44a9dab43`.
 
-## 이번 변경에서 검증한 범위
+## 결과
 
-이번 사이클의 목표는 **실제 GitHub 저장소 URL 또는 ZIP 파일을 입력으로 받아 System Flow → Feature Flow → Evidence 파이프라인까지 연결되는지** 확인하는 것이었다.
+| 검사 | 실제 관측 |
+|---|---|
+| 기존 자동 테스트 | 64 passed |
+| 수정 전 새 회귀 검사 | 8 failed, 2 passed |
+| 수정 후 자동 테스트 | 74 passed; CI에서 제3자 deprecation warning 1건 |
+| Skill 형식 / JavaScript 구문 | PASS |
+| localhost HTTP 서버 및 자체 소스 ZIP | PASS, 분석 9파일 / 실패 0 / 기능 5개 |
+| 일반 Chromium → HTTP 서버 UI | 13 checks PASS, JavaScript page errors 0 |
+| 실제 VibeCare GitHub URL | PASS, 분석 대상 74개 중 48개 읽음 / 26개 제한 생략 / 실패 0 |
+| 같은 commit의 GitHub 다운로드 ZIP | PASS, 분석 대상 74개 모두 읽음 / 실패 0 |
+| 유료 AI 호출 / VibeCare 코드 실행 | NOT RUN |
 
-### 1. 자동 테스트
+브라우저 검사는 전체 지도, 기능별 지도, 코드·연결 근거, 확대, 내보내기 payload, 분석 과정, 예제 전환, 폴더·ZIP 선택, 430px 화면을 검사했다. OS 저장 대화상자는 검사하지 않았다. 실제 GitHub/ZIP 분석은 별도의 실제 HTTP API 검사로 수행했다.
 
-```text
-pytest -q
-64 passed
+## 실패 → 수정 → 재검증
+
+[첫 원격 실행 37344388644](https://github.com/Dowon-Kang/Flowlens/actions/runs/37344388644): GitHub/ZIP PASS, browser FAIL. Playwright의 문자열 평가 대기가 CSP의 unsafe-eval 금지에 걸렸다. 앱 보안 정책을 완화하지 않고 locator 기반 대기로 변경했다.
+
+[재검증 37344830770](https://github.com/Dowon-Kang/Flowlens/actions/runs/37344830770): 전체 PASS. `report.json` 시각은 2026-10-05T16:58:42Z, Python 3.13.15, browser transport HTTP. 성공 후 검증된 일반 소스가 위 commit으로 저장되었다. [로그·스크린샷·분석 JSON](https://github.com/Dowon-Kang/Flowlens/actions/runs/37344830770/artifacts/11359798127)은 7일 보관 아티팩트다.
+
+로컬 작업 환경의 DNS 및 일반 Chromium navigation은 정책상 차단되어 별도 기록했다. 로컬 bridge 13개 성공을 일반 HTTP 성공으로 대체하지 않았고, 일반 HTTP 검사는 원격 Actions에서 실제 수행했다.
+
+## 실제 분석 결과
+
+VibeCare commit: `69307b9015f420803a132048ee98031c322d3cc1`.
+저장소 파일 186개 중 지원·선택 정책에 해당하는 소스는 74개. 문서·테스트 등 112개는 제외했다. ZIP의 partial=false는 이 74개를 모두 읽었다는 의미이지, 186개 전체를 의미하지 않는다.
+
+두 입력에서 사용자 + Flutter App + Riverpod/Controller + Service/Dio + Hono Backend + PostgreSQL client + Supabase, 총 7개 overview 노드를 만들었다. 기능 그룹은 10개이며 로그인/인증, Fitrus, 추천 등이 포함된다. HTTP method/path 연결 후보는 6개다.
+
+GitHub 입력은 48파일 제한으로 import 11건이 미해결이다. ZIP은 더 많은 소스를 읽어 일부 연결이 추가된다. 두 결과를 완전히 동일한 그래프나 실제 runtime 실행 경로라고 부르지 않는다. Supabase와 PostgreSQL이 같은 운영 DB인지는 확정하지 않는다.
+
+## 재현
+
+```bash
+python scripts/verify.py --browser
+python scripts/verify.py --browser --live https://github.com/Dowon-Kang/vibecare-pilot
 ```
 
-검증 범위:
-
-- 기존 System/Feature/Evidence 회귀 테스트
-- GitHub URL 형식 및 GitHub API 응답 Mock
-- GitHub commit/tree/blob 고정 읽기
-- rate limit / 404 / 잘린 tree / symlink 처리
-- ZIP 공통 루트 폴더 제거
-- ZIP path traversal 차단
-- ZIP 바이너리 소스 거부
-- ZIP API end-to-end 분석
-- 근거 ID·줄 번호·상하위 그래프 일관성 gate
-
-### 2. 실제 ZIP 파일 서버 분석
-
-실제 `FlowLens_MVP_v0.1.zip`(약 745 KiB)을 실행 중인 FastAPI 서버의 `/api/analyze-zip`으로 전송했다.
-
-결과:
-
-```text
-source: zip
-archive files discovered: 85
-eligible files: 15
-analyzed files: 15
-failed: 0
-partial: false
-recognized API features: 4
-pipeline: INTAKE → EXTRACT → BUILD → VERIFY → EXPLAIN(skipped)
-```
-
-ZIP은 디스크에 압축 해제하지 않고 메모리에서 읽는다. 대상 코드 실행이나 패키지 설치도 하지 않는다.
-
-
-### 2-1. v0.2.0 자체 ZIP 재분석
-
-최종 패키지 `FlowLens_MVP_v0.2.0.zip`도 같은 HTTP 경로로 다시 분석했다.
-
-```text
-archive files discovered: 95
-eligible files: 16
-analyzed files: 16
-failed: 0
-partial: false
-recognized API features: 5
-  - Health
-  - Analyze
-  - Analyze Zip
-  - Demo
-  - Root
-```
-
-즉 새로 추가한 `/api/analyze-zip` 자체가 다음 ZIP 분석 결과에서도 인식되었다. 결과 원본은 `evidence/09-v020-self-zip-analysis.json`에 보관한다.
-
-### 3. HTTP 서버 실행
-
-```text
-GET /api/health
-200 OK
-version: 0.2.0
-mode: local-first
-```
-
-localhost 서버와 ZIP POST 경로가 실제 HTTP 요청에서 동작함을 확인했다.
-
-### 4. 브라우저 UI 검증
-
-이 실행 환경에서는 Chromium의 localhost 직접 navigation이 관리자 정책으로 차단되었다. 따라서 기존 Playwright bridge 모드로 실제 FastAPI `TestClient`와 UI를 연결해 다음 12개 항목을 확인했다.
-
-- System overview 표시
-- Feature Flow 진입
-- 코드 근거 표시
-- 연결 근거 표시
-- 확대/맞춤
-- JSON/SVG/Markdown export payload
-- 분석 과정 표시
-- 서로 다른 기술 스택 전환
-- 도움말 dialog
-- 로컬 폴더 선택 분석
-- 모바일 430px overflow 확인
-- JavaScript page error 없음
-
-ZIP 버튼/엔드포인트는 API 테스트와 실제 HTTP POST로 별도 확인했다.
-
-## 실제 GitHub 검증
-
-연결된 GitHub 계정에서 `Dowon-Kang/vibecare-pilot`의 실제 repository tree와 다음 기술 근거를 확인했다.
-
-- Flutter + Riverpod
-- Dio client
-- Hono backend
-- Supabase Flutter SDK
-- PostgreSQL `pg` driver
-- auth / measurement / recommendation routes
-
-따라서 FlowLens가 대상으로 삼는 대표 구조가 실제 저장소에 존재함은 확인했다.
-
-다만 **현재 실행 컨테이너는 외부 DNS가 차단**되어 `app/intake.py`의 `httpx`가 `api.github.com`에 직접 접속하는 live end-to-end 테스트는 실행하지 못했다. 서버는 이 상황에서 오류를 fake success로 바꾸지 않고 다음 오류를 반환했다.
-
-```text
-GitHub 연결 또는 응답 해석에 실패했습니다. 로컬 폴더 분석을 사용할 수 있습니다.
-```
-
-로컬/일반 개발 환경에서 아래 명령으로 live GitHub 경로를 다시 확인할 수 있다.
-
-```powershell
-python scripts/live_github_check.py https://github.com/Dowon-Kang/vibecare-pilot
-```
-
-GitHub rate limit이 필요한 경우에만 `GITHUB_TOKEN`을 서버 환경변수로 제공한다.
-
-## 현재 판정
-
-| 기능 | 판정 |
-| --- | --- |
-| 합성 예제 분석 | PASS |
-| 로컬 폴더 분석 | PASS |
-| ZIP 파일 분석 | PASS |
-| ZIP 안전성 gate | PASS |
-| 실제 HTTP ZIP 분석 | PASS |
-| GitHub API Mock E2E | PASS |
-| 실제 GitHub repository 존재/구조 확인 | PASS |
-| 앱 프로세스 → api.github.com live 요청 | ENVIRONMENT BLOCKED |
-| AI 설명 live 호출 | NOT TESTED |
-
-`ENVIRONMENT BLOCKED`는 구현 실패로 판정하지 않지만, 배포/사용자 PC에서 반드시 재검증해야 한다.
+검사기는 서버를 직접 시작·종료하고 `evidence/latest/EXECUTION_VALIDATION.md`, `report.json`, 로그를 생성한다. 네트워크 실패를 가짜 데모 성공으로 바꾸지 않는다. 상시 Actions는 읽기 권한으로 검사하며 코드를 자동 수정하지 않는다.

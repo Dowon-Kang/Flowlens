@@ -1,81 +1,24 @@
-# FlowLens v0.2.0 수정 기록
+# v0.2.1 수정 기록 — Cycle 03
 
-검증 과정에서 실제로 발견한 문제와 수정 내용을 기록한다.
+검증 날짜: 2026-10-06. 기존 64개 테스트 후 새 회귀 검사 10개 중 8개 실패를 먼저 재현했다. 수정 후 전체 74개를 재실행했다.
 
-## 1. ZIP 입력 경로 부재
+| 발견한 문제 | 수정 |
+|---|---|
+| `Dio.get<Map<String, dynamic>>()`가 요청으로 인식되지 않음 | 제한된 제네릭 형식 및 줄바꿈 지원, HTTP 연결은 candidate 유지 |
+| 여러 줄 named import에서 Hono 인식 실패 | 세미콜론으로 범위를 제한한 multiline import 지원 |
+| DB 드라이버가 일반 helper보다 뒤로 밀림 | 진입점·라우트·controller/provider·저장 계층 수집 우선순위 개선 |
+| ZIP 한도를 적용하기 전에 불필요한 파일까지 압축 해제 | 읽기 전에 파일 수·파일 크기·총 바이트 예산 제한 |
+| 큰 파일 및 symlink가 통계에서 누락 | discovered = analyzed + skipped + omitted + failed 집계 |
+| 분석에서 제외되는 README의 중복 ZIP 경로를 허용 | 모든 파일 경로를 정규화한 뒤 중복 거부 |
+| 사용자 노드를 더하면 전체 화면이 9개가 됨 | 실제 구성요소 7개 + 사용자 1개로 제한 |
+| ZIP 선택 UI가 bridge 검사에서 빠짐 | 실제 File 바이트를 전달해 ZIP picker까지 검사 |
 
-### 문제
-기존 v0.1은 공개 GitHub URL과 브라우저 폴더 선택만 지원했다. 사용자가 일반적으로 전달하는 GitHub 다운로드 ZIP이나 프로젝트 ZIP을 직접 넣을 수 없었다.
+추가로 ZIP 수집을 동시성 제한 안으로 이동하고 event loop 밖에서 실행한다. 버전은 `app.__version__`을 공유한다. 주석·문자열 속 가짜 요청, 기존 보안·근거·AI 출력 회귀 검사도 유지했다.
 
-### 수정
-- `/api/analyze-zip` 추가
-- UI에 `ZIP 선택` 버튼 추가
-- ZIP 공통 최상위 폴더(`repo-main/`) 자동 제거
-- 기존과 동일한 `INTAKE → EXTRACT → BUILD → VERIFY → EXPLAIN` 파이프라인 재사용
+원본 ZIP은 저장소에 보존하고 일반 소스를 별도로 버전 관리한다. 초기 업로드에 사용한 쓰기 권한 workflow와 일회용 변환 스크립트는 검증 후 제거했다. 상시 CI는 contents:read로만 동작한다.
 
-## 2. ZIP 안전성 경계 부족
+이 수정은 완전한 Dart/TS 의미 분석, 실제 함수 호출 추적, 운영 DB 관계 검증을 구현했다는 뜻이 아니다.
 
-### 문제
-ZIP을 단순 압축 해제하면 path traversal, symlink, 과도한 파일 수/크기 문제가 생길 수 있다.
+## 원격 브라우저 검사에서 추가 발견
 
-### 수정
-- 디스크에 압축 해제하지 않고 메모리에서 읽음
-- `..`, 절대 경로, 제어문자 경로 거부
-- 암호화 ZIP 거부
-- symlink 무시
-- ZIP 최대 12 MiB
-- 내부 파일 최대 2,500개 검사
-- 단일 archive member 256 KiB 초과 제외
-- 실제 분석 파일은 기존 64 KiB / 총 2 MiB 제한 유지
-
-## 3. 분석 파이프라인 중복 가능성
-
-### 문제
-새 입력 유형을 추가할 때 GitHub/폴더/ZIP마다 EXTRACT 이후 로직을 복제하면 결과 계약이 갈라질 위험이 있었다.
-
-### 수정
-`analyze_snapshot()`을 분리해 모든 입력을 `Snapshot`으로 정규화한 뒤 같은 분석 파이프라인을 사용하게 했다.
-
-```text
-GitHub ─┐
-Folder ─┼→ Snapshot → EXTRACT → BUILD → VERIFY → EXPLAIN
-ZIP ────┘
-```
-
-## 4. 버전 표시 불일치
-
-### 문제
-패키지 버전만 올리고 결과 JSON의 `analyzer_version`을 그대로 두면 API 응답과 서버 health 버전이 다르게 보일 수 있었다.
-
-### 수정
-서버 버전과 analyzer 결과 버전을 모두 `0.2.0`으로 맞췄다.
-
-## 5. 실제 GitHub 검증 표현 과장 가능성
-
-### 문제
-v0.1 문서에는 GitHub 네트워크 분석이 실제로 실행되지 않았다고 적혀 있었지만, 실제 저장소 구조 검증과 앱 프로세스의 live HTTP 검증이 명확히 분리되지 않았다.
-
-### 수정
-`EXECUTION_VALIDATION.md`에서 다음을 분리했다.
-
-- 연결된 GitHub를 통해 실제 `vibecare-pilot` tree/파일 확인: PASS
-- GitHub API 로직 Mock E2E: PASS
-- 현재 sandbox 앱 프로세스 → api.github.com DNS 연결: ENVIRONMENT BLOCKED
-
-## 6. 테스트 수와 README 상태 불일치
-
-### 문제
-README의 59개 테스트 기록이 새 기능 추가 뒤 실제 상태와 달랐다.
-
-### 수정
-현재 기록을 64개 자동 테스트 통과로 갱신하고 ZIP·GitHub 검증 상태를 함께 명시했다.
-
-## 남아 있는 수정 후보
-
-다음 항목은 이번 사이클에서 발견했지만 아직 구현하지 않았다.
-
-1. Hono router prefix와 동적 path parameter의 더 정확한 결합
-2. Dart/Dio의 문자열 보간 URL 추적
-3. 큰 저장소에서 48개 파일을 중요도 기반으로 더 정교하게 선택
-4. 함수 호출 수준 Feature Trace
-5. 네트워크 허용 환경에서 live GitHub end-to-end 캡처
+첫 Actions 실행에서 실제 GitHub URL/ZIP 분석은 통과했지만 Playwright의 `wait_for_function` 문자열 평가가 앱의 `script-src 'self'` 정책에 차단되었다. 앱의 CSP를 완화하지 않고 네 군데 대기를 `expect(locator).to_have_text/to_contain_text`로 교체했다. 실패 run: 37344388644. 수정 후 run 37344830770에서 13개 일반 HTTP 브라우저 검사와 GitHub/ZIP 분석을 모두 재통과했다.

@@ -18,8 +18,12 @@
 ## API
 GET /api/health — 버전/선택적 AI 사용 가능 여부. 키는 절대 반환 안 함.
 POST /api/analyze — {source: demo|github|files, demo: mobile|python, url?, files?, explain: false}
+POST /api/analyze-zip — raw application/zip 본문; filename, explain 선택 query. 동일 Snapshot 파이프라인 사용.
 GET /api/demo/{mobile|python} — 합성 fixture 파일만 반환.
 GET / — 정적 브라우저 UI.
+
+## ZIP coverage
+압축 해제 전에 읽기 예산을 제한한다. 파일 항목 집계: discovered = analyzed + skipped + omitted + failed. partial=false는 지원·선택 대상에서 생략과 실패가 없다는 의미이며 모든 저장소 파일을 분석했다는 뜻이 아니다.
 
 ## 공격/회귀 사례
 가짜 URL / path traversal / `.env` / 주석 속 import / 문자열 속 가짜 코드 / undefined endpoint / AI의 가짜 ID / truncation / 서버가 다른데 같은 HTTP path / Supabase와 Postgres의 무근거 합치기.

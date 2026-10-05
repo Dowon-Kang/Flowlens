@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 · 2026-10-06
+
+- GitHub 소스 연결 및 재사용 가능한 실행 검증 루프.
+- typed Dio/multiline import, 수집 우선순위, ZIP 사전 예산·coverage, 8노드 상한 수정.
+- 74 tests + 13 real HTTP browser checks + 실제 VibeCare GitHub/같은 commit ZIP PASS.
+- CSP를 유지한 locator 기반 브라우저 대기. 상세 run 기록은 docs/EXECUTION_VALIDATION.md.
+
 ## 0.2.0 · 2026-10-06
 
 ### Added
