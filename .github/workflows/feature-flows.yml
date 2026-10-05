@@ -4,44 +4,76 @@ on:
     branches: [feat/evidence-scoped-flows]
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
-  reference:
+  verified-source-update:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Apply only checksum-guarded reviewed edits
+        run: |
+          python .automation/sync_backend.py
+          python .automation/sync_ui.py
+          python .automation/sync_docs.py
       - run: python -m pip install -r requirements-dev.txt
-      - name: Read public source as data, never execute target code
+      - run: python -m playwright install --with-deps chromium
+      - name: Unit, HTTP, browser, real GitHub and same-commit ZIP
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/verify.py --browser --live https://github.com/Dowon-Kang/vibecare-pilot --output evidence/cycle-04-ci
+      - name: Capture source and check meaning, not just clickability
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          python scripts/capture_reference.py --output evidence/cycle-04-ci/snapshot.json
+          python scripts/acceptance_flow.py --snapshot evidence/cycle-04-ci/snapshot.json --output evidence/cycle-04-ci/semantic
+      - name: Actual browser upload and nested processing flow
+        run: |
+          python run.py > evidence/cycle-04-ci/acceptance-server.log 2>&1 &
+          PID=$!
+          trap 'kill "$PID" || true' EXIT
           python - <<'PY'
-          import asyncio, hashlib, json, os, subprocess
+          import time,httpx
+          for _ in range(30):
+              try:
+                  if httpx.get('http://127.0.0.1:8000/api/health',trust_env=False).status_code==200:break
+              except httpx.HTTPError:pass
+              time.sleep(0.2)
+          else:raise SystemExit('Server failed to start')
+          PY
+          python scripts/process_browser.py --snapshot evidence/cycle-04-ci/snapshot.json --output evidence/cycle-04-ci/process-browser
+          python scripts/build_review_demo.py evidence/cycle-04-ci/semantic/analysis.json evidence/cycle-04-ci/FlowLens_Demo.html
+      - name: Save verified ordinary source and remove one-time writer
+        run: |
+          cp .automation/verified-feature-workflow.yml .github/workflows/feature-flows.yml
+          git rm .automation/sync_backend.py .automation/sync_ui.py .automation/sync_docs.py .automation/verified-feature-workflow.yml
+          git add app static scripts tests docs README.md CHANGELOG.md .github/workflows/feature-flows.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat: verified v0.3 processing summaries and evidence-scoped function exploration'
+          git push origin HEAD:refs/heads/feat/evidence-scoped-flows
+          python - <<'PY'
+          import hashlib,json,subprocess,zipfile
           from pathlib import Path
-          import httpx
-          import app.intake as intake
-          intake.MAX_REMOTE_FILES = 160
-          out = Path('evidence/feature-reference'); out.mkdir(parents=True, exist_ok=True)
-          async def run():
-              headers = {'Accept': 'application/vnd.github+json', 'User-Agent': 'FlowLens-Acceptance', 'Authorization': 'Bearer '+os.environ['GITHUB_TOKEN']}
-              async with httpx.AsyncClient(headers=headers, timeout=20, trust_env=False) as client:
-                  snapshot = await intake.GitHubReader(client).read('https://github.com/Dowon-Kang/vibecare-pilot')
-              (out/'snapshot.json').write_text(snapshot.model_dump_json(), encoding='utf-8')
-              print(snapshot.revision, snapshot.coverage.model_dump())
-          asyncio.run(run())
-          names = subprocess.check_output(['git','ls-files'], text=True).splitlines()
-          manifest = {name: hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in names if Path(name).is_file()}
-          (out/'source-manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
+          out=Path('evidence/cycle-04-ci')
+          files=subprocess.check_output(['git','ls-files'],text=True).splitlines()
+          files=[f for f in files if not f.endswith('.zip') and not f.startswith('evidence/')]
+          manifest={f:hashlib.sha256(Path(f).read_bytes()).hexdigest() for f in files}
+          (out/'source-manifest.json').write_text(json.dumps(manifest),encoding='utf-8')
+          (out/'source-commit.txt').write_text(subprocess.check_output(['git','rev-parse','HEAD'],text=True),encoding='utf-8')
+          with zipfile.ZipFile(out/'FlowLens_Source.zip','w',zipfile.ZIP_DEFLATED) as z:
+              for f in files:z.write(f,'flowlens/'+f)
           PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: feature-reference
-          path: evidence/feature-reference/
+          name: cycle-04-verification
+          path: evidence/cycle-04-ci/
           retention-days: 7
