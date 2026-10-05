@@ -44,3 +44,8 @@ python scripts/verify.py --browser --live https://github.com/Dowon-Kang/vibecare
 ```
 
 검사기는 서버를 직접 시작·종료하고 `evidence/latest/EXECUTION_VALIDATION.md`, `report.json`, 로그를 생성한다. 네트워크 실패를 가짜 데모 성공으로 바꾸지 않는다. 상시 Actions는 읽기 권한으로 검사하며 코드를 자동 수정하지 않는다.
+
+## 최종 상시 CI 확인
+
+검증 commit: `726707c8b1ae9ef421a97ef107e4b4e8c650c8a6`.
+[Run 37345576776](https://github.com/Dowon-Kang/Flowlens/actions/runs/37345576776)의 `contracts-and-browser`와 `live-github-and-zip` 작업이 모두 completed/success임을 확인했다. 이 설정은 contents:read이며 초기 복원·변환용 쓰기 workflow와 임시 스크립트는 제거했다. 이 최종 결과 기록은 문서만 변경하므로 소스 재검증을 다시 유발하지 않는다.
