@@ -3,8 +3,8 @@
 - Integrate the previously local v0.3.1/0.3.2 reliability fixes.
 - Preserve source-order view; add guarded, evidence-linked activity control-flow.
 - Separate abrupt exits, dependencies and calls; unsupported scopes fail closed.
-- Add 37 regression tests and browser acceptance steps; local browser is unavailable.
-- See docs/CYCLE_07_EXECUTION.md for actual results, not past PASS records.
+- Add 38 regression tests and browser acceptance steps; remote 200-test / 15-browser-check CI passes after fixing SVG text inspection. Local browser remains unavailable.
+- See docs/CYCLE_07_PUBLICATION.md for final CI/push results and CYCLE_07_EXECUTION.md for local history.
 
 # Changelog
 
