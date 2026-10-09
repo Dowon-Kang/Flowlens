@@ -115,8 +115,8 @@ def main():
             page.locator('#processTools [data-detail="activity"]').click()
             expect(page.locator('#canvasTitle')).to_contain_text('UML')
             assert page.locator('#graph polygon').count()==1
-            assert '[true]' in page.locator('#graph').inner_text()
-            assert '[false]' in page.locator('#graph').inner_text()
+            assert '[true]' in page.locator('#graph').text_content()
+            assert '[false]' in page.locator('#graph').text_content()
             page.locator('#graph [data-node]').filter(has=page.locator('title',has_text='raise ValueError')).first.click()
             assert page.locator('#detailPanel .code-evidence').count()>0
             assert '실행 미검증' in page.locator('#detailPanel').inner_text()
