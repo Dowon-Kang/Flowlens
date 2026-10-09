@@ -25,7 +25,7 @@ def infra_key(module: str) -> str | None:
     return None
 
 def resolve_import(path: str, module: str, paths: set[str], package_roots: dict[str,str]) -> str | None:
-    suffix=PurePosixPath(path).suffix
+    suffix=PurePosixPath(path).suffix.lower()
     if suffix=='.py':
         if module.startswith('.'):
             n=len(module)-len(module.lstrip('.'))
@@ -55,7 +55,7 @@ def classify(path: str, imports: list[str]) -> str:
         if re.search(r'controller|provider|store|state|hooks?/',p): return 'state'
         if re.search(r'service|repository|client|api[_/-]',p) and not re.search(r'(screen|view|component|\.tsx|\.jsx)',p): return 'transport'
         return 'app'
-    if path.endswith('.py') or re.search(r'backend|server|routes?|services?|(^|/)api/',p) or any(x in imp for x in ['hono','fastapi','express','flask']):
+    if path.lower().endswith('.py') or re.search(r'backend|server|routes?|services?|(^|/)api/',p) or any(x in imp for x in ['hono','fastapi','express','flask']):
         return 'backend'
     return 'modules'
 
@@ -68,7 +68,7 @@ def module_tag(path: str) -> str:
     return next((label for text,label in names if text in p),PurePosixPath(path).stem.replace('_',' ').replace('-',' ').title())
 
 def build_analysis(snapshot: Snapshot, facts: list[Fact], evidence: list[Evidence], warnings: list[str]) -> Analysis:
-    source_files=[f for f in snapshot.files if PurePosixPath(f.path).suffix in SOURCE_SUFFIXES]
+    source_files=[f for f in snapshot.files if PurePosixPath(f.path).suffix.lower() in SOURCE_SUFFIXES]
     paths={f.path for f in source_files}
     by_path: dict[str,list[Fact]]=defaultdict(list)
     for fact in facts: by_path[fact.path].append(fact)
@@ -92,7 +92,7 @@ def build_analysis(snapshot: Snapshot, facts: list[Fact], evidence: list[Evidenc
             if not lines: continue
             line=next((i+1 for i,x in enumerate(lines) if x.strip()),1)
             eid=stable_id('ev',file.path,str(line),'source')
-            e=Evidence(id=eid,path=file.path,line=line,end_line=line,snippet=lines[line-1],kind='source',parser='ast' if file.path.endswith('.py') else 'lexical')
+            e=Evidence(id=eid,path=file.path,line=line,end_line=line,snippet=lines[line-1],kind='source',parser='lexical')
             evidence_map[eid]=e; eids=[eid]
         role=classify(file.path,[f.value for f in pf if f.kind=='import'])
         nid=path_ids[file.path]
@@ -247,6 +247,10 @@ def build_analysis(snapshot: Snapshot, facts: list[Fact], evidence: list[Evidenc
                     nodes=list(nodes.values()),edges=list(edges.values()),system_nodes=system_nodes,system_edges=list(system_edges.values()),features=features,
                     evidence=list(evidence_map.values()),facts=facts,warnings=list(dict.fromkeys(output_warnings)),summary=summary)
 
+    for edge in [*result.edges, *result.system_edges]:
+        edge.relationship_kind = "dependency" if edge.relation in {"import", "sdk"} else "reference"
     from .process import project_processes
     project_processes(result, snapshot)
+    from .quality import quality_report
+    result.analysis_quality, result.diagnostics = quality_report(result, snapshot)
     return result

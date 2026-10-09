@@ -70,7 +70,7 @@ def main():
         for kind in ['json','svg','md']:
             page.locator('#exportButton').click();page.locator('[data-export="'+kind+'"]').click()
         exports=page.evaluate('Promise.all(window.__exports.map(b=>b.text()))')
-        assert json.loads(exports[0])['schema_version']=='1.1'
+        assert json.loads(exports[0])['schema_version']=='1.2'
         assert '<svg' in exports[1] and 'flowchart TD' in exports[2]
         checks.append('JSON, SVG and Markdown export payloads (not OS save dialog)')
         page.locator('#pipelineNav').click()
@@ -98,6 +98,37 @@ def main():
                 assert 'FastAPI Backend' in page.locator('#graph').text_content()
                 assert 'zip-browser-demo' in page.locator('#repoName').inner_text()
                 checks.append('Actual ZIP picker -> raw ZIP upload -> safe server intake -> graph')
+        # New UML user story: selected source bytes are DATA, never executed.
+        with tempfile.TemporaryDirectory() as td:
+            archive=Path(td)/'uml-browser-demo.zip'
+            fixture=("from fastapi import FastAPI\napp=FastAPI()\n"
+                "@app.get('/guard')\ndef guard(data=None):\n"
+                "    if data is None:\n        raise ValueError('missing')\n"
+                "    return {'ok': True}\n"
+                "@app.get('/unsupported')\ndef unsupported():\n"
+                "    for x in items:\n        save(x)\n    return None\n")
+            with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr('uml-browser-demo/backend/main.py',fixture)
+            page.locator('#zipInput').set_input_files(str(archive))
+            expect(page.locator('#repoName')).to_contain_text('uml-browser-demo')
+            page.locator('#sidebarFeatures [data-feature]').filter(has_text='Guard').click()
+            page.locator('#processTools [data-detail="activity"]').click()
+            expect(page.locator('#canvasTitle')).to_contain_text('UML')
+            assert page.locator('#graph polygon').count()==1
+            assert '[true]' in page.locator('#graph').inner_text()
+            assert '[false]' in page.locator('#graph').inner_text()
+            page.locator('#graph [data-node]').filter(has=page.locator('title',has_text='raise ValueError')).first.click()
+            assert page.locator('#detailPanel .code-evidence').count()>0
+            assert '실행 미검증' in page.locator('#detailPanel').inner_text()
+            page.screenshot(path=str(out/'uml-activity.png'),full_page=True)
+            checks.append('UML activity: actual ZIP upload -> guarded branches -> exception evidence')
+            page.locator('#sidebarFeatures [data-feature]').filter(has_text='Unsupported').click()
+            page.locator('#processTools [data-detail="activity"]').click()
+            expect(page.locator('#detailPanel')).to_contain_text('활동 흐름 미생성')
+            assert page.locator('#graph [data-node]').count()==0
+            page.locator('#detailPanel [data-detail="steps"]').click()
+            assert page.locator('#graph [data-node]').count()>0
+            checks.append('Unsupported UML grammar: explicit reason, empty graph, source-order fallback')
         page.locator('[data-demo="mobile"]').click()
         expect(page.locator("#repoName")).to_contain_text("FlowCare")
         page.set_viewport_size({'width':430,'height':932})

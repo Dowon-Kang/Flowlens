@@ -20,6 +20,10 @@ async def analyze_snapshot(snapshot: Snapshot, explain_requested: bool = False) 
     record('EXTRACT',t,f'{len(facts)} facts · {len(evidence)} evidence records')
     t=perf_counter();result=build_analysis(snapshot,facts,evidence,warnings)
     record('BUILD',t,f'{len(result.nodes)} canonical nodes → {len(result.system_nodes)} overview nodes')
+    if result.analysis_quality and result.analysis_quality.parse_failed_files:
+        extract_stage=next(stage for stage in stages if stage.name=='EXTRACT')
+        extract_stage.status='warning'
+        extract_stage.detail+=f' · {result.analysis_quality.parse_failed_files} Python parse failures'
     t=perf_counter();verify_analysis(result,snapshot)
     record('VERIFY',t,'Evidence ranges, IDs, feature subsets and parent mapping checked')
     t=perf_counter()
@@ -46,7 +50,7 @@ async def run_analysis(request: AnalyzeRequest) -> Analysis:
     if request.source=='demo':
         snapshot=load_demo(request.demo)
     elif request.source=='files':
-        snapshot=from_files(request.files)
+        snapshot=from_files(request.files, manifest=request.manifest, read_failures=request.read_failures)
     else:
         headers={'Accept':'application/vnd.github+json','User-Agent':'FlowLens-MVP','X-GitHub-Api-Version':'2022-11-28'}
         token=os.environ.get('GITHUB_TOKEN','')

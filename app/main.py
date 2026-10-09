@@ -9,9 +9,9 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import ValidationError
 from . import __version__
-from .models import AnalyzeRequest
+from .models import AnalyzeRequest, FilePlanRequest
 from .orchestrator import run_analysis, analyze_snapshot
-from .intake import IntakeError, load_demo, from_zip_bytes, MAX_ZIP_BYTES
+from .intake import IntakeError, load_demo, from_zip_bytes, MAX_ZIP_BYTES, plan_files
 from .verifier import VerificationError
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -41,6 +41,25 @@ async def safety_headers(request: Request,call_next):
 @app.get('/api/health')
 async def health():
     return {'ok':True,'version':__version__,'ai_configured':bool(os.getenv('OPENAI_API_KEY') and os.getenv('OPENAI_MODEL')),'mode':'local-first'}
+
+@app.post('/api/file-plan')
+async def file_plan(request: Request):
+    """Metadata only. Reuse ZIP selection policy before browser content reads."""
+    if 'application/json' not in request.headers.get('content-type', ''):
+        return JSONResponse({'error': 'JSON 요청만 지원합니다.'}, status_code=415)
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > MAX_BODY:
+            return JSONResponse({'error': '요청 크기가 3 MiB를 초과했습니다.'}, status_code=413)
+    try:
+        data = FilePlanRequest.model_validate_json(raw)
+        selected, coverage = plan_files(data.entries, strip_root=True)
+        return {'selected': selected, 'coverage': coverage.model_dump()}
+    except ValidationError:
+        return JSONResponse({'error': '파일 목록 형식·개수·크기를 확인해 주세요.'}, status_code=422)
+    except IntakeError as exc:
+        return JSONResponse({'error': str(exc)}, status_code=400)
 
 @app.post('/api/analyze')
 async def analyze(request: Request):

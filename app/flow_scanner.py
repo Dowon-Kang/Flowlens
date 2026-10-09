@@ -29,7 +29,7 @@ class Scope:
 
 
 def source_masks(path: str, text: str) -> tuple[str,str]:
-    if not path.endswith('.py'):return masks(text)
+    if not path.lower().endswith('.py'):return masks(text)
     lines=text.splitlines(keepends=True);starts=[0]
     for line in lines:starts.append(starts[-1]+len(line))
     nc=list(text);code=list(text)

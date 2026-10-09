@@ -8,9 +8,11 @@ import re
 from collections import defaultdict
 from urllib.parse import quote
 from .models import Analysis, Snapshot, Evidence, ProcessFlow, ProcessStep, CallSite, Feature
-from .extractor import masks, stable_id
+from .extractor import masks, stable_id, lexical_http_candidate
 from .flow_scanner import Scope, lexical_scopes, python_scopes, line_at, matching, source_masks
 from .graph import resolve_import
+from .http_clients import python_http_calls
+from .python_symbols import PythonSymbolIndex
 
 LABELS={
  'auth':'인증 확인', 'validate':'입력·조건 검증', 'read':'데이터 조회',
@@ -18,16 +20,19 @@ LABELS={
  'recommend':'추천 계산', 'classify':'등급 분류', 'safety':'안전 조건 확인',
  'adjust':'강도·계수 조정', 'write':'데이터 저장', 'network':'외부 요청',
  'token':'토큰·허가 발급', 'response':'결과 반환', 'prepare':'값 준비',
+ 'exception':'예외 발생', 'unknown':'호출 의미 미확인',
  'select':'설정 선택', 'sdk-auth':'SDK 인증 호출', 'condition':'조건 분기',
 }
 SDK_AUTH=re.compile(r'\.auth\.(signInWithPassword|signUp|signOut|refreshSession|resetPasswordForEmail)\s*\(')
 
 
-def classify_statement(code: str, nc: str, calls: list[str]) -> str:
-    names=' '.join(calls)
+def classify_statement(code: str, nc: str, calls: list[str], *, resolved_names: list[str] | None = None, network: bool = False, sdk: bool = False) -> str:
+    # Identifier hints need a resolved local/imported target and remain candidates.
+    names=' '.join(resolved_names or [])
     first=code.strip()
-    if first.startswith(('return','raise','throw')):return 'response'
-    if SDK_AUTH.search(code):return 'sdk-auth'
+    if re.match(r'(raise|throw)\b', first):return 'exception'
+    if re.match(r'return\b', first):return 'response'
+    if sdk and SDK_AUTH.search(code):return 'sdk-auth'
     # Conditional checks precede effects, and their outcomes are shown in evidence.
     if re.match(r'(if|for|while|switch)\b',first):
         par=code.find('(');end=matching(code,par) if par>=0 else None
@@ -41,12 +46,13 @@ def classify_statement(code: str, nc: str, calls: list[str]) -> str:
             ('recommend',r'calculateRecommend'),('classify',r'classif|MuscleLevel'),
             ('adjust',r'Coefficient|RequestedIntensity|clamp'),('safety',r'safety|safetyWarnings'),
             ('read',r'load|read|\.query|\.prepare|\.select|\.first|\.all\b'),
-            ('network',r'fetch|\.get\b|\.post\b|\.measure\b'),('calculate',r'calculat|mean\b|round\b'),
+            ('calculate',r'calculat|mean\b|round\b'),
             ('write',r'\.insert|\.update|\.delete|\.batch|save|persist')]
-    if re.match(r'try\b',first) and re.search(r'fetch|\.measure\b',names):return 'network'
+    if network:return 'network'
     if re.search(r'\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM)\b',nc,re.I) and re.search(r'\.prepare|\.query',names):return 'write'
     for kind,pattern in checks:
         if re.search(pattern,names,re.I):return kind
+    if calls:return 'unknown'
     # For assignments without calls, distinguish visible operations from inventions.
     lhs=re.match(r'\s*(?:const|let|var|final)?\s*([A-Za-z_$]\w*)\s*(?::[^=;]+)?=',code)
     if lhs:
@@ -55,7 +61,6 @@ def classify_statement(code: str, nc: str, calls: list[str]) -> str:
         if re.search(r'\?|\[',code) and re.search('base|setting|threshold',var,re.I):return 'select'
         if re.search('coefficient|intensity|factor',var,re.I):return 'adjust'
         if re.search(r'(?<![*/])[*+/](?![*/])',code):return 'calculate'
-    if re.search(r'\.(json|send)\s*\(',code):return 'response'
     return 'prepare'
 
 
@@ -63,18 +68,22 @@ def project_processes(result: Analysis, snapshot: Snapshot) -> None:
     files={f.path:f.content for f in snapshot.files};file_nodes={n.path:n for n in result.nodes if n.kind=='file'}
     path_facts=defaultdict(list)
     for f in result.facts:path_facts[f.path].append(f)
-    scopes=[];masked={};imports={};roots={}
+    scopes=[];masked={};imports={};roots={};http_sites={}
     for path,text in files.items():
         if path.endswith('pubspec.yaml'):
             m=re.search(r'^name:\s*([\w-]+)',text,re.M)
             if m:roots[m.group(1)]=path.rsplit('/',1)[0] if '/' in path else '.'
     for path,node in file_nodes.items():
         text=files[path];masked[path]=source_masks(path,text)
-        scopes.extend(python_scopes(path,text,path_facts[path]) if path.endswith('.py') else lexical_scopes(path,text,path_facts[path]))
+        scopes.extend(python_scopes(path,text,path_facts[path]) if path.lower().endswith('.py') else lexical_scopes(path,text,path_facts[path]))
         binding={}
-        if path.endswith('.py'):
+        if path.lower().endswith('.py'):
             try:
                 tree=ast.parse(text)
+                http = python_http_calls(tree)
+                lines=text.splitlines(keepends=True);starts=[];offset=0
+                for line in lines:starts.append(offset);offset+=len(line)
+                http_sites[path] = {(starts[n.lineno-1]+len(lines[n.lineno-1].encode('utf-8')[:n.col_offset].decode('utf-8')), ast.unparse(n.func)) for n in ast.walk(tree) if isinstance(n, ast.Call) and id(n) in http}
                 for stmt in tree.body:
                     if isinstance(stmt,ast.ImportFrom):
                         target=resolve_import(path,'.'*stmt.level+(stmt.module or ''),set(file_nodes),roots)
@@ -91,6 +100,7 @@ def project_processes(result: Analysis, snapshot: Snapshot) -> None:
                         bits=re.sub(r'^\s*type\s+','',name.strip()).split(' as ')
                         if bits and re.fullmatch(r'\w+',bits[0]):binding[bits[-1].strip()]=(target,bits[0])
         imports[path]=binding
+    python_index=PythonSymbolIndex(files,scopes)
     sdk_labels={}
     for path,(nc,code) in masked.items():
         if not any('supabase' in f.value.lower() for f in path_facts[path] if f.kind=='import'):continue
@@ -134,7 +144,7 @@ def project_processes(result: Analysis, snapshot: Snapshot) -> None:
         if not re.fullmatch(r'[\w$]+',name) or name in s.parameters:return '' 
         nc,code=masked[s.path]
         if re.search(r'\b(?:const|let|var|final)\s+'+re.escape(name)+r'\b',code[s.body:s.end]):return ''
-        if s.path.endswith('.py') and re.search(r'(?m)^\s*'+re.escape(name)+r'\s*(?::[^=\n]+)?=(?!=)',code[s.body:s.end]):return ''
+        if s.path.lower().endswith('.py') and re.search(r'(?m)^\s*'+re.escape(name)+r'\s*(?::[^=\n]+)?=(?!=)',code[s.body:s.end]):return ''
         candidates=[]
         for t in named[(s.path,name)]:
             if t.class_name:continue
@@ -160,21 +170,40 @@ def project_processes(result: Analysis, snapshot: Snapshot) -> None:
             calls=[]
             for at,name in s.calls:
                 if start<=at<end:
-                    callee=resolve(s,name)
-                    calls.append(CallSite(name=name,evidence_id=evidence(s,at),callee_id=callee,resolution='static-candidate' if callee else 'unresolved'))
-            category=classify_statement(fragment,clean,[c.name for c in calls])
+                    if s.parser=='ast':
+                        callee,basis,reason=python_index.resolve(s.path,at,name)
+                    else:
+                        callee=resolve(s,name)
+                        basis='lexical' if callee else 'unresolved'
+                        reason='제한된 import·선언 패턴의 연결 후보입니다. 타입·실행은 미검증입니다.' if callee else '지원하는 import·선언 근거로 대상을 연결하지 못했습니다.'
+                    calls.append(CallSite(name=name,offset=at,evidence_id=evidence(s,at),callee_id=callee,resolution='static-candidate' if callee else 'unresolved',resolution_basis=basis,resolution_reason=reason))
+            if s.path.lower().endswith('.py'):
+                network=any((at,name) in http_sites.get(s.path,set()) for at,name in s.calls if start<=at<end)
+            else:
+                network=any(start<=at<end and name.split('.')[0] not in s.parameters
+                    and lexical_http_candidate(name,nc,code,at) for at,name in s.calls)
+            category=classify_statement(fragment,clean,[c.name for c in calls],
+                resolved_names=[c.name for c in calls if c.callee_id],network=network,
+                sdk=any('supabase' in f.value.lower() for f in path_facts[s.path] if f.kind=='import'))
+            # An expression-bodied arrow implicitly returns regardless of the
+            # called method's name. This is syntax, not HTTP/business inference.
+            if s.parser!='ast' and code[s.start:s.body].rstrip().endswith('=>'):
+                category='response'
+            semantic_status=('unknown' if category=='unknown' else
+                'syntax' if category in {'exception','response','prepare','condition'} else 'candidate')
             conditional=bool(re.search(r'\b(if|for|while|try|catch|switch)\b|\?|=>',fragment))
             eids=list(dict.fromkeys([evidence(s,start,end)]+[c.evidence_id for c in calls]))
             # Include later return/throw sites, otherwise a long guard could hide its exit.
             for exit_match in re.finditer(r'\b(return|throw|raise)\b',fragment):
                 eids.append(evidence(s,start+exit_match.start(),kind='exit'))
-            if category=='prepare' and prev is not None:
-                category=prev.category
-            if prev is not None and (category==prev.category or prev.category=='prepare'):
-                if prev.category=='prepare':prev.category=category;prev.label=LABELS[category]
+            # Never absorb unknown/exception statements into a preceding label.
+            if prev is not None and category==prev.category and semantic_status==prev.semantic_status:
                 prev.end_line=line_at(text,max(start,end-1));prev.evidence_ids=list(dict.fromkeys(prev.evidence_ids+eids));prev.calls.extend(calls);prev.conditional|=conditional
             else:
-                prev=ProcessStep(id=stable_id('step',s.id,str(start)),label=LABELS[category],category=category,line=line_at(text,start),end_line=line_at(text,max(start,end-1)),evidence_ids=list(dict.fromkeys(eids)),node_ids=[node.id],calls=calls,conditional=conditional)
+                description={'syntax':'문법 근거 · 실제 실행 미검증',
+                             'candidate':'근거가 있는 의미 해석 후보 · 실제 실행 미검증',
+                             'unknown':'호출 의미 미확인 · 이름만으로 확정하지 않음 · 실제 실행 미검증'}[semantic_status]
+                prev=ProcessStep(id=stable_id('step',s.id,str(start)),label=LABELS[category],category=category,line=line_at(text,start),end_line=line_at(text,max(start,end-1)),evidence_ids=list(dict.fromkeys(eids)),node_ids=[node.id],calls=calls,conditional=conditional,semantic_status=semantic_status,description=description)
                 steps.append(prev)
         if not steps:continue
         kind=s.kind
@@ -186,7 +215,9 @@ def project_processes(result: Analysis, snapshot: Snapshot) -> None:
     for flow in flows.values():
         for step in flow.steps:
             for c in step.calls:
-                if c.callee_id not in flows:c.callee_id='';c.resolution='unresolved'
+                if c.callee_id and c.callee_id not in flows:
+                    c.callee_id='';c.resolution='unresolved';c.resolution_basis='unresolved'
+                    c.resolution_reason='정의는 발견했지만 지원되는 본문 처리 지도를 만들지 못했습니다.'
     route_index=defaultdict(list)
     for s in scopes:
         if s.kind=='route' and s.id in flows:route_index[(s.path,s.method+' '+s.endpoint)].append(s.id)
@@ -237,6 +268,8 @@ def project_processes(result: Analysis, snapshot: Snapshot) -> None:
             for call in step.calls:
                 if call.callee_id and call.callee_id not in kept:kept.add(call.callee_id);queue.append(call.callee_id)
     result.flows=[flow for fid,flow in flows.items() if fid in kept]
+    from .activity import attach_activities
+    attach_activities(result,files,scopes_by_id,masked,evidence)
     used={eid for f in result.flows for eid in f.evidence_ids}
     result.evidence.extend(e for eid,e in ev.items() if eid in used and eid not in {x.id for x in result.evidence})
-    result.summary=f'{snapshot.coverage.analyzed}개 파일 · {len(result.system_nodes)-1}개 핵심 영역 · {len(result.features)}개 기능 · 본문 기반 처리 지도 {len(result.flows)}개. 정적 분석이며 실행 관측이 아닙니다.'
+    result.summary=f'{snapshot.coverage.analyzed}개 파일 · {max(0,len(result.system_nodes)-1)}개 핵심 영역 · {len(result.features)}개 기능 · 본문 기반 처리 지도 {len(result.flows)}개. 정적 분석이며 실행 관측이 아닙니다.'

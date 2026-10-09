@@ -30,6 +30,8 @@ def verify_analysis(result: Analysis, snapshot: Snapshot) -> None:
     if len(set(members))!=len(members) or set(members)!=set(nodes): raise VerificationError('overview membership 중복/누락')
     for graph_edges, graph_nodes in [(result.edges,nodes),(result.system_edges,system)]:
         for e in graph_edges:
+            expected_kind='dependency' if e.relation in {'import','sdk'} else 'reference'
+            if e.relationship_kind!=expected_kind:raise VerificationError('구성 관계를 실행 관계로 혼동함')
             if e.source not in graph_nodes or e.target not in graph_nodes: raise VerificationError('edge endpoint 없음')
             if not e.evidence_ids or any(x not in ev for x in e.evidence_ids): raise VerificationError('edge 근거 없음')
             if e.relation in {'http-contract','entry-model'} and e.confidence!='candidate': raise VerificationError('후보 관계를 사실로 승격함')
@@ -55,14 +57,31 @@ def verify_analysis(result: Analysis, snapshot: Snapshot) -> None:
             if not (flow.line<=step.line<=step.end_line<=flow.end_line) or step.line<previous:
                 raise VerificationError('처리 단계 순서/범위 오류')
             previous=step.line
+            if step.category=='unknown' and step.semantic_status!='unknown':
+                raise VerificationError('미확인 의미를 확정 근거로 승격함')
+            if step.semantic_status=='syntax' and step.category not in {'exception','response','prepare','condition'}:
+                raise VerificationError('의미 해석 후보를 문법 근거로 과장함')
             if not step.evidence_ids or not set(step.evidence_ids)<=set(flow.evidence_ids):raise VerificationError('처리 단계 근거 누락')
             if not set(step.node_ids)<=set(flow.node_ids):raise VerificationError('처리 단계 소속 오류')
             for eid in step.evidence_ids:
                 e=ev[eid]
                 if e.path!=flow.path or not (step.line<=e.line<=step.end_line):raise VerificationError('처리 단계 범위 밖 근거')
             for call in step.calls:
+                if call.relation!="call":raise VerificationError("호출 관계 유형 오류")
                 if call.evidence_id not in step.evidence_ids:raise VerificationError('호출 위치 근거 없음')
+                if not call.callee_id and (call.resolution!='unresolved' or call.resolution_basis!='unresolved'):
+                    raise VerificationError('미확인 호출을 정적 연결로 승격함')
+                if call.callee_id and (not call.resolution_reason or call.resolution_basis=='unresolved'):
+                    raise VerificationError('호출 대상의 해석 근거가 없음')
                 if call.callee_id and (call.callee_id not in flows or call.resolution!='static-candidate'):
                     raise VerificationError('호출 대상 없음/실행 확정 과장')
+    from .activity import verify_activity
+    for flow in result.flows:
+        verify_activity(flow,ev)
     for feature in result.features:
         if not set(feature.flow_ids)<=set(flows):raise VerificationError('기능 처리 지도 누락')
+
+    from .quality import quality_report
+    quality, diagnostics = quality_report(result, snapshot)
+    if result.analysis_quality != quality or result.diagnostics != diagnostics:
+        raise VerificationError('읽기·파싱·미확인 진단 통계 불일치')
