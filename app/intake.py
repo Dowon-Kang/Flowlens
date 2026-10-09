@@ -11,7 +11,7 @@ import zlib
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse, quote
 import httpx
-from .models import Coverage, Snapshot, SourceFile
+from .models import Coverage, Snapshot, SourceFile, FileMetadata, ReadFailure, BrowserSelection
 
 MAX_FILES = 160
 MAX_REMOTE_FILES = 160
@@ -36,13 +36,21 @@ def valid_path(path: str) -> str:
         raise IntakeError('상대 경로만 허용하며 .. 경로는 사용할 수 없습니다.')
     return str(p)
 
-def eligible_path(path: str) -> bool:
+def exclusion_reason(path: str) -> str:
+    """One server-owned eligibility policy, shared by folder, ZIP and GitHub."""
     p = PurePosixPath(valid_path(path))
-    if any(part.startswith('.') or part.lower() in EXCLUDED_PARTS for part in p.parts):
-        return False
-    if SECRET.search(p.name) or re.search(r'(\.test\.|\.spec\.|\.d\.ts$|\.g\.dart$|\.freezed\.dart$|\.min\.js$)', p.name):
-        return False
-    return p.suffix.lower() in SOURCE_SUFFIXES or p.name in MANIFESTS
+    if any(part.startswith('.') or SECRET.search(part) for part in p.parts):
+        return 'secret_or_hidden'
+    if any(part.lower() in EXCLUDED_PARTS for part in p.parts):
+        return 'excluded_directory'
+    if re.search(r'(\.test\.|\.spec\.|\.d\.ts$|\.g\.dart$|\.freezed\.dart$|\.min\.js$)', p.name):
+        return 'generated_or_test'
+    if p.suffix.lower() not in SOURCE_SUFFIXES and p.name not in MANIFESTS:
+        return 'unsupported_type'
+    return ''
+
+def eligible_path(path: str) -> bool:
+    return not exclusion_reason(path)
 
 def priority(path: str) -> tuple[int, str]:
     p = path.lower()
@@ -58,43 +66,106 @@ def priority(path: str) -> tuple[int, str]:
         rank = 4
     return rank, path
 
-def from_files(files: list[SourceFile], name: str = 'Local repository', source: str = 'files') -> Snapshot:
-    seen: set[str] = set()
-    candidates: list[SourceFile] = []
-    warnings: list[str] = []
-    oversized = 0
-    for item in files:
-        path = valid_path(item.path)
-        if path in seen:
-            raise IntakeError(f'중복된 파일 경로입니다: {path}')
-        seen.add(path)
-        if eligible_path(path):
-            if len(item.content.encode('utf-8')) > MAX_FILE_BYTES or '\x00' in item.content:
-                oversized += 1
-                continue
-            candidates.append(SourceFile(path=path, content=item.content))
-    accepted: list[SourceFile] = []
-    total = 0
-    for item in sorted(candidates, key=lambda x: priority(x.path)):
-        size = len(item.content.encode('utf-8'))
-        if len(accepted) >= MAX_FILES or total + size > MAX_TOTAL_BYTES:
-            continue
-        accepted.append(item)
-        total += size
-    omitted = len(candidates) - len(accepted) + oversized
-    if omitted:
-        warnings.append(f'용량·개수 제한으로 {omitted}개 파일을 분석하지 못했습니다.')
-    if not any(PurePosixPath(f.path).suffix in SOURCE_SUFFIXES for f in accepted):
-        raise IntakeError('분석할 지원 소스가 없습니다. Python / JavaScript / TypeScript / Dart 파일을 선택해 주세요.')
-    coverage = Coverage(discovered=len(files), eligible=len(candidates)+oversized,
-                        analyzed=len(accepted), skipped=len(files)-len(candidates)-oversized,
-                        omitted=omitted, bytes_read=total, partial=bool(omitted),
-                        notes=['선택되거나 수집된 파일만 분석합니다. 문서·테스트·빌드 결과·비밀 파일은 제외합니다.'])
-    digest = hashlib.sha256()
-    for f in sorted(accepted, key=lambda x: x.path):
-        digest.update(f.path.encode()+b'\x00'+f.content.encode()+b'\x00')
-    return Snapshot(name=name, source=source, revision=digest.hexdigest(), files=accepted, coverage=coverage, warnings=warnings)
+def plan_files(entries: list[FileMetadata], *, strip_root: bool = False,
+               symlinks: set[int] | None = None) -> tuple[list[dict], Coverage]:
+    """Select by metadata BEFORE reading. Reused by folder preflight and ZIP.
 
+    A failed read consumes its selected slot/byte budget; there is no format-
+    dependent backfill. Recheck the manifest on submission, never trust counts.
+    """
+    if len(entries) > MAX_ZIP_ENTRIES:
+        raise IntakeError(f'파일 목록은 최대 {MAX_ZIP_ENTRIES}개까지 지원합니다.')
+    paths = [valid_path(e.path) for e in entries]
+    if len(set(paths)) != len(paths):
+        raise IntakeError('중복된 파일 경로입니다.')
+    mapping = _strip_common_zip_root(paths) if strip_root else dict(zip(paths, paths))
+    cov = Coverage(discovered=len(entries), notes=[
+        '선택되거나 수집된 파일만 분석합니다. 문서·테스트·빌드 결과·비밀 파일은 제외합니다.'])
+    candidates = []
+    for i, entry in enumerate(entries):
+        path = mapping[paths[i]]
+        reason = exclusion_reason(path)
+        if reason:
+            cov.skipped += 1
+            cov.reason_counts[reason] = cov.reason_counts.get(reason, 0) + 1
+        else:
+            cov.eligible += 1
+            candidates.append({'index': i, 'path': path, 'size': entry.size})
+    selected = []; total = 0
+    for item in sorted(candidates, key=lambda x: priority(x['path'])):
+        reason = ('symlink' if item['index'] in (symlinks or set()) else
+                  'file_bytes' if item['size'] > MAX_FILE_BYTES else
+                  'file_count' if len(selected) >= MAX_FILES else
+                  'total_bytes' if total + item['size'] > MAX_TOTAL_BYTES else '')
+        if reason:
+            cov.omitted += 1
+            cov.reason_counts[reason] = cov.reason_counts.get(reason, 0) + 1
+        else:
+            selected.append(item); total += item['size']
+    cov.partial = bool(cov.omitted)
+    return selected, cov
+
+
+def _snapshot(files: list[SourceFile], coverage: Coverage, name: str, source: str) -> Snapshot:
+    if not any(PurePosixPath(f.path).suffix.lower() in SOURCE_SUFFIXES for f in files):
+        raise IntakeError('분석할 지원 소스가 없습니다. Python / JavaScript / TypeScript / Dart 파일을 선택해 주세요.')
+    coverage.analyzed = len(files)
+    coverage.bytes_read = sum(len(f.content.encode('utf-8')) for f in files)
+    coverage.partial = bool(coverage.omitted or coverage.failed)
+    digest = hashlib.sha256()
+    for f in sorted(files, key=lambda x: x.path):
+        digest.update(f.path.encode()+b'\x00'+f.content.encode()+b'\x00')
+    warnings = []
+    if coverage.partial:
+        warnings.append(f'부분 분석: 지원 후보 {coverage.eligible}개 중 {coverage.analyzed}개 분석, '
+                        f'{coverage.omitted}개 제한 제외, {coverage.failed}개 읽기 실패.')
+    return Snapshot(name=name, source=source, revision=digest.hexdigest(), files=files,
+                    coverage=coverage, warnings=warnings)
+
+
+def from_files(files: list[SourceFile], name: str = 'Local repository', source: str = 'files',
+               *, manifest: list[FileMetadata] | None = None,
+               read_failures: list[ReadFailure] | None = None) -> Snapshot:
+    failures = read_failures or []
+    paths = [valid_path(f.path) for f in files]
+    if len(set(paths)) != len(paths):
+        raise IntakeError('중복된 파일 경로입니다.')
+    try:
+        sizes = [len(f.content.encode('utf-8')) for f in files]
+    except UnicodeError as exc:
+        raise IntakeError('올바른 UTF-8 소스가 아닙니다.') from exc
+    entries = manifest if manifest is not None else [
+        FileMetadata(path=p, size=size) for p, size in zip(paths, sizes)]
+    selected, cov = plan_files(entries, strip_root=manifest is not None)
+    by_path = {p: f for p, f in zip(paths, files)}
+    failed = {valid_path(f.path): f.reason for f in failures}
+    if manifest is not None:
+        picked = {item['path'] for item in selected}
+        if (len(failed) != len(failures) or set(failed) & set(by_path)
+                or set(by_path) | set(failed) != picked):
+            raise IntakeError('전송 파일·읽기 실패 목록이 서버의 파일 선택 결과와 다릅니다.')
+        if any(len(by_path[x['path']].content.encode('utf-8')) != x['size']
+               for x in selected if x['path'] in by_path):
+            raise IntakeError('파일 내용 크기가 선택 목록과 다릅니다.')
+    elif failures:
+        raise IntakeError('읽기 실패 목록에는 원본 파일 목록이 필요합니다.')
+    accepted = []
+    for item in selected:
+        path = item['path']; reason = failed.get(path, '')
+        f = by_path.get(path)
+        if not reason and f is not None and '\x00' in f.content:
+            reason = 'invalid_text'
+        if reason:
+            cov.failed += 1
+            cov.reason_counts[reason] = cov.reason_counts.get(reason, 0) + 1
+        else:
+            accepted.append(SourceFile(path=path, content=f.content))
+    snapshot = _snapshot(accepted, cov, name, source)
+    if manifest is not None:
+        cov.browser_selection = BrowserSelection(discovered=len(entries), transmitted=len(files),
+            skipped=cov.skipped, omitted=cov.omitted, failed=cov.failed, reason_counts=dict(cov.reason_counts))
+        cov.notes.append('폴더 발견 수·파일 크기·읽기 실패는 브라우저 보고입니다. 서버가 선택 정책과 전송 내용을 재검사했지만 로컬 디스크를 직접 검증하지는 않았습니다.')
+    return snapshot
 
 
 def _zip_member_is_symlink(info: zipfile.ZipInfo) -> bool:
@@ -108,6 +179,9 @@ def _strip_common_zip_root(paths: list[str]) -> dict[str, str]:
     first_parts = [PurePosixPath(path).parts for path in paths]
     if all(len(parts) > 1 for parts in first_parts):
         root = first_parts[0][0]
+        # Never erase a security exclusion by treating it as an archive wrapper.
+        if root.startswith('.') or SECRET.search(root) or root.lower() in EXCLUDED_PARTS:
+            return {path: path for path in paths}
         if all(parts[0] == root for parts in first_parts):
             return {path: PurePosixPath(*PurePosixPath(path).parts[1:]).as_posix() for path in paths}
     return {path: path for path in paths}
@@ -137,36 +211,26 @@ def from_zip_bytes(data: bytes, filename: str = 'repository.zip') -> Snapshot:
             if info.flag_bits & 0x1:
                 raise IntakeError('암호화된 ZIP 파일은 지원하지 않습니다.')
             paths.append(path)
-        mapping = _strip_common_zip_root(paths)
-        candidates = [(info, mapping[path]) for info, path in zip(infos, paths)
-                      if eligible_path(mapping[path])]
-        files: list[SourceFile] = []
-        omitted = failed = consumed = attempts = 0
-        for info, path in sorted(candidates, key=lambda item: priority(item[1])):
-            if (_zip_member_is_symlink(info) or info.file_size > MAX_FILE_BYTES
-                    or attempts >= MAX_FILES or consumed + info.file_size > MAX_TOTAL_BYTES):
-                omitted += 1
-                continue
-            attempts += 1
-            consumed += info.file_size
+        selected, cov = plan_files([FileMetadata(path=p, size=i.file_size) for p, i in zip(paths, infos)],
+            strip_root=True, symlinks={i for i, info in enumerate(infos) if _zip_member_is_symlink(info)})
+        files = []
+        for item in selected:
+            info = infos[item['index']]
+            reason = ''
             try:
                 raw = archive.read(info)
                 if len(raw) != info.file_size or b'\x00' in raw:
                     raise ValueError('invalid text member')
-                files.append(SourceFile(path=path, content=raw.decode('utf-8')))
-            except (UnicodeError, RuntimeError, zipfile.BadZipFile, zlib.error, EOFError, ValueError):
-                failed += 1
+                files.append(SourceFile(path=item['path'], content=raw.decode('utf-8')))
+            except (UnicodeError, ValueError):
+                reason = 'invalid_text'
+            except (RuntimeError, NotImplementedError, zipfile.BadZipFile, zlib.error, EOFError):
+                reason = 'read_error'
+            if reason:
+                cov.failed += 1
+                cov.reason_counts[reason] = cov.reason_counts.get(reason, 0) + 1
         name = PurePosixPath(filename or 'repository.zip').name.removesuffix('.zip') or 'ZIP repository'
-        snapshot = from_files(files, name=name, source='zip')
-        cov = snapshot.coverage
-        cov.discovered = len(infos)
-        cov.eligible = len(candidates)
-        cov.skipped = len(infos) - len(candidates)
-        cov.omitted += omitted
-        cov.failed = failed
-        cov.partial = bool(cov.omitted or failed)
-        if cov.partial:
-            snapshot.warnings.append(f'ZIP 부분 분석: 지원 후보 {cov.eligible}개 중 {cov.analyzed}개 분석, {cov.omitted}개 제한 제외, {failed}개 읽기 실패.')
+        snapshot = _snapshot(files, cov, name, 'zip')
         cov.notes.append('ZIP은 메모리에서 읽으며 파일을 디스크에 풀거나 대상 코드를 실행하지 않습니다.')
         cov.notes.append('압축 해제 전에 파일당 64 KiB, 최대 파일 수와 총 2 MiB 읽기 예산을 적용합니다.')
         return snapshot
@@ -240,46 +304,56 @@ class GitHubReader:
             raise IntakeError('저장소 파일 트리를 확인하지 못했습니다.')
         tree = await self.get(prefix + f'/git/trees/{tree_sha}?recursive=1')
         entries = tree.get('tree', [])
+        if not isinstance(entries, list) or any(not isinstance(x, dict) for x in entries):
+            raise IntakeError('예상하지 못한 GitHub 트리 형식입니다.')
         blobs = [x for x in entries if x.get('type') == 'blob']
-        candidates = []
-        for x in blobs:
-            try:
-                eligible = eligible_path(x.get('path', ''))
-            except IntakeError:
-                eligible = False
-            if eligible:
-                candidates.append(x)
-        readable = [x for x in candidates if x.get('mode') != '120000' and isinstance(x.get('size'), int) and x['size'] <= MAX_FILE_BYTES and re.fullmatch(r'[a-fA-F0-9]{40}', x.get('sha', ''))]
-        picked = sorted(readable, key=lambda x: priority(x['path']))[:MAX_REMOTE_FILES]
+        # Same server-owned metadata plan as folder/ZIP: decide BEFORE requests,
+        # not after downloading 160 potentially-large blobs.
+        try:
+            metadata = [FileMetadata(path=x.get('path'), size=x.get('size')) for x in blobs]
+        except ValueError as exc:
+            raise IntakeError('GitHub 파일 경로·크기 메타데이터가 올바르지 않습니다.') from exc
+        picked, cov = plan_files(metadata,
+            symlinks={i for i, x in enumerate(blobs) if x.get('mode') == '120000'})
         semaphore = asyncio.Semaphore(4)
-        failures: list[str] = []
-        async def fetch_one(x: dict) -> SourceFile | None:
+
+        async def fetch_one(item: dict) -> tuple[SourceFile | None, str]:
+            x = blobs[item['index']]
+            if not re.fullmatch(r'[a-fA-F0-9]{40}', str(x.get('sha', ''))):
+                return None, 'read_error'
             async with semaphore:
                 try:
                     blob = await self.get(prefix + '/git/blobs/' + x['sha'], limit=120000)
-                    if blob.get('encoding') != 'base64':
-                        raise IntakeError('미지원 인코딩')
-                    raw = base64.b64decode(blob.get('content', ''), validate=False)
-                    if len(raw) > MAX_FILE_BYTES:
-                        raise IntakeError('파일 크기 초과')
-                    return SourceFile(path=x['path'], content=raw.decode('utf-8'))
-                except (ValueError, UnicodeError, IntakeError):
-                    failures.append(x['path'])
-                    return None
+                    if blob.get('encoding') != 'base64' or not isinstance(blob.get('content'), str):
+                        raise IntakeError('미지원 blob 인코딩')
+                    encoded = re.sub(r'\s+', '', blob['content'])
+                    raw = base64.b64decode(encoded, validate=True)
+                    if len(raw) != item['size'] or len(raw) > MAX_FILE_BYTES:
+                        raise IntakeError('blob 크기가 고정된 트리 메타데이터와 다릅니다.')
+                except (ValueError, IntakeError):
+                    return None, 'read_error'
+                try:
+                    if b'\x00' in raw:
+                        return None, 'invalid_text'
+                    return SourceFile(path=item['path'], content=raw.decode('utf-8')), ''
+                except (UnicodeError, ValueError):
+                    return None, 'invalid_text'
+
         fetched = await asyncio.gather(*(fetch_one(x) for x in picked))
-        snapshot = from_files([f for f in fetched if f], f'{owner}/{repo}', 'github')
+        files = []; failures = []
+        for item, (file, reason) in zip(picked, fetched):
+            if reason:
+                failures.append(item['path'])
+                cov.failed += 1
+                cov.reason_counts[reason] = cov.reason_counts.get(reason, 0) + 1
+            else:
+                files.append(file)
+        snapshot = _snapshot(files, cov, f'{owner}/{repo}', 'github')
         snapshot.revision = sha
         snapshot.repository_url = f'https://github.com/{owner}/{repo}'
-        cov = snapshot.coverage
-        cov.discovered = len(blobs)
-        cov.eligible = len(candidates)
-        cov.skipped = len(blobs)-len(candidates)
-        cov.failed = len(failures)
-        cov.omitted = len(candidates)-cov.analyzed-cov.failed
         cov.tree_truncated = bool(tree.get('truncated'))
-        cov.partial = bool(cov.omitted or failures or cov.tree_truncated)
-        if cov.partial:
-            snapshot.warnings.append(f'부분 분석: 지원 후보 {cov.eligible}개 중 {cov.analyzed}개를 읽었습니다. 파일 선택/실패/잘린 트리 범위를 확인하세요.')
+        cov.partial = bool(cov.omitted or cov.failed or cov.tree_truncated)
+        cov.notes.append('GitHub도 폴더·ZIP과 같은 메타데이터 계획으로 읽기 전에 파일 수·총 바이트를 제한합니다.')
         if failures:
             snapshot.warnings.append('읽기 실패: ' + ', '.join(failures[:6]))
         if cov.tree_truncated:

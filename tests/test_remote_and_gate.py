@@ -9,6 +9,7 @@ from app.verifier import verify_analysis, VerificationError
 SHA='a'*40
 TREE='b'*40
 BLOB='c'*40
+BLOB_CONTENT=b'from fastapi import FastAPI\napp = FastAPI()\n'
 
 def remote(handler):
     async def run():
@@ -25,13 +26,13 @@ def transport(private=False, truncated=False, failed=False, symlink=False):
         if '/commits/' in p: return httpx.Response(200,json={'sha':SHA,'commit':{'tree':{'sha':TREE}}})
         if '/git/trees/' in p:
             assert TREE in p
-            entries=[{'path':'main.py','type':'blob','mode':'100644','size':42,'sha':BLOB}]
+            entries=[{'path':'main.py','type':'blob','mode':'100644','size':len(BLOB_CONTENT),'sha':BLOB}]
             if symlink: entries.append({'path':'link.py','type':'blob','mode':'120000','size':8,'sha':'d'*40})
             return httpx.Response(200,json={'tree':entries,'truncated':truncated})
         if '/git/blobs/' in p:
             if failed: return httpx.Response(404)
             assert BLOB in p
-            return httpx.Response(200,json={'encoding':'base64','content':base64.b64encode(b'from fastapi import FastAPI\napp = FastAPI()\n').decode()})
+            return httpx.Response(200,json={'encoding':'base64','content':base64.b64encode(BLOB_CONTENT).decode()})
         raise AssertionError(p)
     return handler,calls
 
